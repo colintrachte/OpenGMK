@@ -1,13 +1,13 @@
 @echo off
-:: run.bat -- Launch gm8emulator on Windows (cmd.exe)
+:: run.bat -- Launch gm8decompiler on Windows (cmd.exe)
 :: Usage: run.bat <path-to-game.exe> [options]
 
 setlocal
 
-set EMU=%~dp0target\release\gm8emulator.exe
+set EMU=%~dp0target\release\gm8decompiler.exe
 
 if not exist "%EMU%" (
-    echo ERROR: gm8emulator.exe not found. Run setup.bat first to build the project.
+    echo ERROR: gm8decompiler.exe not found. Run setup.bat first to build the project.
     exit /b 1
 )
 
