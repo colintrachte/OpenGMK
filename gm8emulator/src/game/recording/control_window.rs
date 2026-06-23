@@ -382,7 +382,7 @@ impl ControlWindow {
     }
 
     /// runs a frame of the game
-    /// if an error occured it will return a message, otherwise None
+    /// if an error occurred it will return a message, otherwise None
     fn run_frame(&self, game: &mut Game, renderer_state: &crate::render::RendererState) -> Option<String> {
         let (w, h) = game.renderer.stored_size();
 

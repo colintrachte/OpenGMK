@@ -217,14 +217,54 @@ mod tests {
     use super::*;
 
     #[test]
-    fn colour_test() {
-        let cool_colour = 0xFECAAB; // RGBA #abcafe
-        let col: Colour = cool_colour.into();
-
-        let tup: (u8, u8, u8) = col.into();
-
-        assert_eq!(tup, (171, 202, 254));
+    fn colour_from_u32() {
+        let col: Colour = 0xFECAABu32.into();
         assert_eq!(col.as_decimal(), 0xFECAAB);
-        // TODO: test the rest of the From<> impls
+    }
+
+    #[test]
+    fn colour_to_u32() {
+        let col = Colour::new(171.0 / 255.0, 202.0 / 255.0, 254.0 / 255.0);
+        let dec: u32 = col.into();
+        assert_eq!(dec, 0xFECAAB);
+    }
+
+    #[test]
+    fn colour_from_u8_tuple() {
+        let col: Colour = (171u8, 202u8, 254u8).into();
+        let tup: (u8, u8, u8) = col.into();
+        assert_eq!(tup, (171, 202, 254));
+    }
+
+    #[test]
+    fn colour_from_f64_tuple() {
+        let col: Colour = (1.0f64, 0.5f64, 0.0f64).into();
+        assert_eq!((col.r, col.g, col.b), (1.0, 0.5, 0.0));
+    }
+
+    #[test]
+    fn colour_roundtrip_u32() {
+        // Verify u32 -> Colour -> u32 is stable for several values
+        for &n in &[0x000000u32, 0xFFFFFF, 0x0000FF, 0xFF0000, 0xFECAAB] {
+            let col: Colour = n.into();
+            let back: u32 = col.into();
+            assert_eq!(back, n, "roundtrip failed for 0x{:06X}", n);
+        }
+    }
+
+    #[test]
+    fn colour_black_and_white() {
+        let black: Colour = 0x000000u32.into();
+        assert_eq!((black.r, black.g, black.b), (0.0, 0.0, 0.0));
+
+        let white: Colour = 0xFFFFFFu32.into();
+        let tup: (u8, u8, u8) = white.into();
+        assert_eq!(tup, (255, 255, 255));
+    }
+
+    #[test]
+    fn colour_as_hexstring() {
+        let col: Colour = 0xFECAABu32.into();
+        assert_eq!(col.as_hexstring(), "ABCAFE00");
     }
 }

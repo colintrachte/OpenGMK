@@ -170,8 +170,9 @@ impl RenderState {
 pub struct RendererImpl {
     imp: native_gl::PlatformImpl,
     gl: gl::Gl,
-    //program: GLuint,
-    //vao: GLuint,
+    program: GLuint,
+    vao: GLuint,
+    commands_vbo: GLuint,
     atlas_packers: Vec<DensePacker>,
     texture_ids: Vec<Option<GLuint>>,
     zbuf_ids: Vec<Option<GLuint>>,
@@ -603,9 +604,9 @@ impl RendererImpl {
             // Create Renderer
             let mut renderer = Self {
                 imp,
-                //program,
-                //vao,
-                //commands_vbo,
+                program,
+                vao,
+                commands_vbo,
                 atlas_packers: vec![],
                 texture_ids: vec![],
                 zbuf_ids: vec![],
@@ -2590,5 +2591,40 @@ impl RendererTrait for RendererImpl {
 
         // Start next frame
         self.setup_frame(clear_colour)
+    }
+}
+
+impl Drop for RendererImpl {
+    fn drop(&mut self) {
+        unsafe {
+            // Release per-atlas textures, z-buffers, and framebuffers
+            for tex in self.texture_ids.iter().flatten() {
+                self.gl.DeleteTextures(1, tex);
+            }
+            for zbuf in self.zbuf_ids.iter().flatten() {
+                self.gl.DeleteTextures(1, zbuf);
+            }
+            for fbo in self.fbo_ids.iter().flatten() {
+                self.gl.DeleteFramebuffers(1, fbo);
+            }
+
+            // Release the main framebuffer
+            self.gl.DeleteTextures(1, &self.framebuffer.texture);
+            self.gl.DeleteTextures(1, &self.framebuffer.zbuf);
+            self.gl.DeleteFramebuffers(1, &self.framebuffer.fbo);
+
+            // Release the stored framebuffer if one exists
+            if let Some(fb) = self.stored_framebuffer {
+                self.gl.DeleteTextures(1, &fb.texture);
+                self.gl.DeleteTextures(1, &fb.zbuf);
+                self.gl.DeleteFramebuffers(1, &fb.fbo);
+            }
+
+            // Release the uniform buffer, VBO, VAO, and shader program
+            self.gl.DeleteBuffers(1, &self.buf_state);
+            self.gl.DeleteBuffers(1, &self.commands_vbo);
+            self.gl.DeleteVertexArrays(1, &self.vao);
+            self.gl.DeleteProgram(self.program);
+        }
     }
 }

@@ -61,6 +61,7 @@ fn xmain() -> i32 {
     opts.optopt("o", "output-file", "output savestate name in replay mode", "FILE.bin");
     opts.optmulti("a", "game-arg", "argument to pass to the game", "ARG");
     opts.optflagopt("p", "start-save", "Either loads the savestate specified after this parameter or starts at the first frame. If a .gmtas is specified by -f this will start the replay from this savestate instead", "savestate");
+    opts.optopt("e", "encoding", "text encoding for game strings (default: windows-1252; use shift-jis for Japanese games)", "ENCODING");
 
     let matches = match opts.parse(&args[1..]) {
         Ok(matches) => matches,
@@ -128,14 +129,15 @@ fn xmain() -> i32 {
             })
             // if we can't find one, make one
             .unwrap_or_else(|| {
-                let mut random_int = [0u8; 4];
-                getrandom::getrandom(&mut random_int).expect("Couldn't generate a random number");
-                let path = [proj_path.clone(), format!("gm_ttt_{}", u32::from_le_bytes(random_int) % 100000).into()]
+                let mut random_bytes = [0u8; 8];
+                getrandom::getrandom(&mut random_bytes).expect("Couldn't generate a random number");
+                let suffix = hex::encode(random_bytes);
+                let path = [proj_path.clone(), format!("gm_ttt_{}", suffix).into()]
                     .iter()
                     .collect();
                 if let Err(e) = std::fs::create_dir_all(&path) {
-                    println!("Could not create temp folder: {}", e);
-                    println!("If this game uses the temp folder, it will most likely crash.");
+                    eprintln!("Could not create temp folder: {}", e);
+                    eprintln!("If this game uses the temp folder, it will most likely crash.");
                 }
                 path
             })
@@ -225,7 +227,18 @@ fn xmain() -> i32 {
         },
     };
 
-    let encoding = encoding_rs::SHIFT_JIS; // TODO: argument
+    let encoding = match matches.opt_str("e").as_deref().unwrap_or("windows-1252") {
+        "windows-1252" | "cp1252" | "latin-1" => encoding_rs::WINDOWS_1252,
+        "shift-jis" | "shift_jis" | "sjis" => encoding_rs::SHIFT_JIS,
+        "utf-8" | "utf8" => encoding_rs::UTF_8,
+        other => {
+            eprintln!(
+                "unknown encoding '{}'; supported: windows-1252, shift-jis, utf-8",
+                other
+            );
+            return EXIT_FAILURE;
+        },
+    };
 
     let play_type = if project_path.is_some() {
         PlayType::Record
@@ -286,7 +299,7 @@ fn xmain() -> i32 {
         }
         result
     } {
-        println!("Runtime error: {}", err);
+        eprintln!("Runtime error: {}", err);
         EXIT_FAILURE
     } else {
         EXIT_SUCCESS

@@ -4,19 +4,13 @@
 
 * Building GM8Emulator / GM8Decompiler
 
-Start by cloning the repository. We use some git submodules at the moment (unfortunately), so make sure to clone with submodules.
+Start by cloning the repository.
 
 #+begin_src sh
-  git clone --recurse-submodules https://github.com/OpenGMK/OpenGMK.git
+  git clone https://github.com/OpenGMK/OpenGMK.git
 #+end_src
 
-You can also recursively initialise the submodules after you've already cloned.
-
-#+begin_src sh
-  git submodule update --init --recursive
-#+end_src
-
-This project is written in the [[https://www.rust-lang.org][Rust]] programming language. You can download the toolchain manager directly from [[https://rustup.rs]] or a package manager of your choice. Our current minimum supported rust version (MSRV) policy is version *1.59*, if you're downloading it at the time of writing then you almost definitely are up to date but you can check with =rustc -V= to be sure. Please note that currently building for glibc on Windows (=...-pc-windows-gnu=) does not work. Once that's set up, building everything in release mode is pretty simple (but might take a while the first time).
+This project is written in the [[https://www.rust-lang.org][Rust]] programming language. You can download the toolchain manager directly from [[https://rustup.rs]] or a package manager of your choice. Our current minimum supported rust version (MSRV) policy is version *1.77*, if you're downloading it at the time of writing then you almost definitely are up to date but you can check with =rustc -V= to be sure. Please note that currently building for glibc on Windows (=...-pc-windows-gnu=) does not work. Once that's set up, building everything in release mode is pretty simple (but might take a while the first time).
 
 #+begin_src sh
   cd path/to/repo-folder
@@ -38,6 +32,41 @@ If you're on Windows 64-bit and would like to play games with GM8Emulator that r
 The build artifacts for the WoW64 server will be located in =<repo-folder>/gm8emulator-wow64/target/i686-pc-windows-msvc/release=. The binary should either be manually copied to the same folder as =gm8emulator.exe= to work, or the =OPENGMK_WOW64_BINARY= environment variable should be set with the path to the binary.
 
 A much easier alternative to this is building the project as 32-bit on Windows, where the WoW64 server is not required and the DLL loading logic is bundled inside GM8Emulator. It should be noted that cross-platform extension emulation is planned for the long-term future.
+
+* Decompiling a Game
+
+To extract a GameMaker Classic executable back into a project file, pass it to =gm8decompiler=:
+
+#+begin_src sh
+  gm8decompiler path/to/game.exe
+#+end_src
+
+The output file is written alongside the input. The extension is chosen automatically based on the detected GameMaker version:
+
+- =game.gmk= for GameMaker 8.0 games
+- =game.gm81= for GameMaker 8.1 games
+
+To choose a different output path:
+
+#+begin_src sh
+  gm8decompiler path/to/game.exe -o path/to/output.gmk
+#+end_src
+
+** Flags
+
+| Flag | Long form | Description |
+|------+-----------+-------------|
+| =-h= | =--help= | Print help and exit |
+| =-l= | =--lazy= | Disable data integrity checks (try this if a valid game fails to parse) |
+| =-v= | =--verbose= | Log every asset as it is processed |
+| =-d <mode>= | =--deobfuscate <mode>= | Deobfuscation: =auto= (default), =on=, or =off= |
+| =-p= | =--preserve= | Keep broken events as-is instead of attempting to repair them |
+| =-s= | =--singlethread= | Process assets one at a time (slower but uses less RAM) |
+| =-o <file>= | =--output <file>= | Write output to this path instead of next to the input |
+
+Deobfuscation (=-d=) rewrites scrambled GML identifiers into readable names. The default =auto= mode enables it only when the decompiler detects obfuscated asset names. Pass =-d off= to always skip it or =-d on= to always apply it.
+
+If parsing fails with a data error on a game you believe is valid, try =-l= (lazy mode) to relax the integrity checks.
 
 * Recording & Replaying TASes
 

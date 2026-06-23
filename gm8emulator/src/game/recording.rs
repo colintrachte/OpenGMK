@@ -130,7 +130,7 @@ struct UIState<'g> {
     /// Previous value of clean_state, used to switch between grid colors
     clean_state_previous: bool,
 
-    /// Time instant of when the last clean_state switch occured, used to fade between grid colors
+    /// Time instant of when the last clean_state switch occurred, used to fade between grid colors
     clean_state_instant: Option<Instant>,
 
     /// Current blend color of the grid

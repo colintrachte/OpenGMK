@@ -676,7 +676,7 @@ impl Game {
             n => Scaling::Fixed(f64::from(n) / 100.0),
         };
 
-        println!("GPU Max Texture Size: {}", renderer.max_texture_size());
+        eprintln!("GPU Max Texture Size: {}", renderer.max_texture_size());
 
         let particle_shapes = particle::load_shapes(&mut atlases);
 
@@ -736,7 +736,7 @@ impl Game {
                             }) {
                                 Ok(id) => extension_functions.push(Some(ExtensionFunction::Dll(sym.into(), id))),
                                 Err(e) => {
-                                    println!(
+                                    eprintln!(
                                         "WARNING: failed to load extension function {} (from {}): {}",
                                         function.name, dll_name, e
                                     );
@@ -782,7 +782,7 @@ impl Game {
                                     extension_functions.push(Some(ExtensionFunction::Gml(compiler.compile(fn_code)?)));
                                 },
                                 None => {
-                                    println!(
+                                    eprintln!(
                                         "WARNING: failed to load extension function {} (from {})",
                                         function.name, file.name
                                     );
@@ -817,7 +817,7 @@ impl Game {
                             b".mp3" => match audio.add_mp3(data, sound_id as i32) {
                                 Some(x) => FileType::Mp3(x),
                                 None => {
-                                    println!(
+                                    eprintln!(
                                         "WARNING: invalid mp3 data in sound '{}'",
                                         String::from_utf8_lossy(b.name.0.as_ref())
                                     );
@@ -2228,7 +2228,7 @@ impl Game {
 
             self.capture_recording_frame(&mut current_frame_time, self.room.speed);
             if let Some(SceneChange::End) = self.scene_change {
-                println!("game ending");
+                eprintln!("game ending");
                 if let Some(recorder) = self.ffmpeg_recorder.take() {
                     self.stop_recording_capture(recorder);
                 }

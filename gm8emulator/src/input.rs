@@ -12,8 +12,10 @@ use std::{
 const KEY_MAX: usize = u8::max_value() as usize + 1;
 const MB_ANY: i8 = -1;
 const MB_NONE: i8 = 0;
-const VK_NOKEY: u8 = 0; // TODO: dont redefine
-const VK_ANYKEY: u8 = 1; // TODO: dont redefine
+// Same logical values as gml::mappings::constants::{VK_NOKEY, VK_ANYKEY} but as u8 for
+// internal key-code matching; those are f64 GML runtime constants for a different type domain.
+const VK_NOKEY: u8 = 0;
+const VK_ANYKEY: u8 = 1;
 
 #[derive(Copy, Clone, Debug, Deserialize, Serialize)]
 #[repr(u8)]

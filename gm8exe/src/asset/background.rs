@@ -59,7 +59,10 @@ impl Asset for Background {
         writer.write_u32::<LE>(self.width)?;
         writer.write_u32::<LE>(self.height)?;
         if let Some(pixeldata) = &self.data {
-            writer.write_u32::<LE>(pixeldata.len() as u32)?; // TODO: safety. also grep for casts
+            writer.write_u32::<LE>(
+                u32::try_from(pixeldata.len())
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?,
+            )?;
             writer.write_all(&pixeldata)?;
         }
         Ok(())

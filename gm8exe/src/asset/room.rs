@@ -292,7 +292,10 @@ impl Asset for Room {
             writer.write_i32::<LE>(view.following.vspeed)?;
             writer.write_i32::<LE>(view.following.target)?;
         }
-        writer.write_u32::<LE>(self.instances.len() as u32)?; // TODO: srsly grep for 'len as u32'
+        writer.write_u32::<LE>(
+            u32::try_from(self.instances.len())
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?,
+        )?;
         for instance in &self.instances {
             writer.write_i32::<LE>(instance.x)?;
             writer.write_i32::<LE>(instance.y)?;

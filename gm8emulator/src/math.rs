@@ -226,18 +226,32 @@ impl Neg for Real {
     }
 }
 
+// GM8 uses a 1e-13 epsilon for all real comparisons (`=`, `<`, `>`, etc.) — this is
+// observable behavior of the original engine, not a Rust implementation choice.
+// Consequence: PartialEq is not strictly transitive (a==b and b==c doesn't guarantee a==c
+// when values straddle the epsilon boundary). Use `exact_cmp` when strict IEEE ordering
+// is needed (e.g. depth-sort), and `exact_eq` when exact bit-equality is needed.
 impl PartialEq for Real {
     #[inline]
     fn eq(&self, other: &Self) -> bool {
-        self.0 == other.0
+        (self.0 - other.0).abs() < Self::CMP_EPSILON.0
     }
 }
+// Safety: We implement Eq as a marker even though epsilon equality is not strictly
+// transitive. Real is never used as a HashMap key, so the unsoundness doesn't surface.
 impl Eq for Real {}
 
 impl PartialOrd for Real {
     #[inline]
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        self.0.partial_cmp(&other.0)
+        let diff = self.0 - other.0;
+        Some(if diff >= Self::CMP_EPSILON.0 {
+            Ordering::Greater
+        } else if diff <= -Self::CMP_EPSILON.0 {
+            Ordering::Less
+        } else {
+            Ordering::Equal
+        })
     }
 }
 
@@ -356,6 +370,23 @@ impl Real {
         Self(self.0.rem_euclid(other.0))
     }
 
+    /// Exact IEEE 754 equality, bypassing GM8's epsilon. Use for bit-level comparisons
+    /// (serialisation, savestate diffing) where two values that happen to be within
+    /// epsilon of each other must not be treated as identical.
+    #[inline(always)]
+    pub fn exact_eq(self, other: Self) -> bool {
+        self.0 == other.0
+    }
+
+    /// Exact IEEE 754 ordering, bypassing GM8's epsilon. Use for depth-sort and other
+    /// places that need a strict total order rather than GM8's approximate semantics.
+    #[inline]
+    pub fn exact_cmp(&self, other: &Self) -> Option<Ordering> {
+        self.0.partial_cmp(&other.0)
+    }
+
+    /// Sort comparator: NaN sorts before all other values; otherwise uses exact IEEE 754
+    /// order (not epsilon-aware) to keep sort deterministic and stable.
     #[inline]
     pub fn cmp_nan_first(&self, other: &Self) -> Ordering {
         if self.0.is_nan() {
@@ -367,7 +398,7 @@ impl Real {
         if other.0.is_nan() {
             return Ordering::Greater
         }
-        self.partial_cmp(other).unwrap()
+        self.exact_cmp(other).unwrap()
     }
 }
 

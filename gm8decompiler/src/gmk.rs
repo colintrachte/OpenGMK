@@ -9,6 +9,9 @@ use gm8exe::{
 use rayon::prelude::*;
 use std::{io, u32};
 
+/// Block version tag written into GMK files for each asset block (GM8.0 format).
+const BLOCK_VERSION: u32 = 800;
+
 pub trait WriteBuffer: io::Write {
     fn write_buffer(&mut self, buf: &[u8]) -> io::Result<usize> {
         self.write_all(buf)?;
@@ -53,7 +56,7 @@ pub fn write_settings<W>(
 where
     W: io::Write,
 {
-    writer.write_u32::<LE>(800)?;
+    writer.write_u32::<LE>(BLOCK_VERSION)?;
     let mut enc = ZlibWriter::new();
     enc.write_u32::<LE>(settings.fullscreen as u32)?;
     enc.write_u32::<LE>(settings.interpolate_pixels as u32)?;
@@ -184,7 +187,7 @@ where
     W: io::Write,
     F: Fn(&mut ZlibEncoder<Vec<u8>>, &T, GameVersion) -> io::Result<()> + Send + Sync,
 {
-    writer.write_u32::<LE>(800)?;
+    writer.write_u32::<LE>(BLOCK_VERSION)?;
     writer.write_u32::<LE>(list.len() as u32)?;
 
     if multithread {
@@ -234,7 +237,7 @@ pub fn write_trigger<W>(writer: &mut W, trigger: &asset::Trigger, _version: Game
 where
     W: io::Write,
 {
-    writer.write_u32::<LE>(800)?;
+    writer.write_u32::<LE>(BLOCK_VERSION)?;
     writer.write_pas_string(&trigger.name)?;
     writer.write_pas_string(&trigger.condition)?;
     writer.write_u32::<LE>(trigger.moment as u32)?;
@@ -248,7 +251,7 @@ pub fn write_constants<W>(writer: &mut W, constants: &[asset::Constant]) -> io::
 where
     W: io::Write,
 {
-    writer.write_u32::<LE>(800)?;
+    writer.write_u32::<LE>(BLOCK_VERSION)?;
     writer.write_u32::<LE>(constants.len() as u32)?;
     for constant in constants {
         writer.write_pas_string(&constant.name)?;
@@ -265,7 +268,7 @@ where
 {
     writer.write_pas_string(&sound.name)?;
     write_timestamp(writer)?;
-    writer.write_u32::<LE>(800)?;
+    writer.write_u32::<LE>(BLOCK_VERSION)?;
     writer.write_u32::<LE>(sound.kind as u32)?;
     writer.write_pas_string(&sound.extension)?;
     writer.write_pas_string(&sound.source)?;
@@ -301,12 +304,12 @@ where
     let gmk_collision = collision::resolve_map(sprite);
     writer.write_pas_string(&sprite.name)?;
     write_timestamp(writer)?;
-    writer.write_u32::<LE>(800)?;
+    writer.write_u32::<LE>(BLOCK_VERSION)?;
     writer.write_i32::<LE>(sprite.origin_x)?;
     writer.write_i32::<LE>(sprite.origin_y)?;
     writer.write_u32::<LE>(sprite.frames.len() as u32)?;
     for frame in &sprite.frames {
-        writer.write_u32::<LE>(800)?;
+        writer.write_u32::<LE>(BLOCK_VERSION)?;
         writer.write_u32::<LE>(frame.width)?;
         writer.write_u32::<LE>(frame.height)?;
         if frame.width * frame.height != 0 {
@@ -359,7 +362,7 @@ where
     writer.write_u32::<LE>(0)?; // H sep
     writer.write_u32::<LE>(0)?; // V sep
 
-    writer.write_u32::<LE>(800)?;
+    writer.write_u32::<LE>(BLOCK_VERSION)?;
     writer.write_u32::<LE>(background.width)?;
     writer.write_u32::<LE>(background.height)?;
     if background.width * background.height != 0 {
@@ -403,7 +406,7 @@ where
 {
     writer.write_pas_string(&script.name)?;
     write_timestamp(writer)?;
-    writer.write_u32::<LE>(800)?;
+    writer.write_u32::<LE>(BLOCK_VERSION)?;
     writer.write_pas_string(&script.source)?;
     Ok(())
 }
@@ -415,7 +418,7 @@ where
 {
     writer.write_pas_string(&font.name)?;
     write_timestamp(writer)?;
-    writer.write_u32::<LE>(800)?;
+    writer.write_u32::<LE>(BLOCK_VERSION)?;
     writer.write_pas_string(&font.sys_name)?;
     writer.write_u32::<LE>(font.size)?;
     writer.write_u32::<LE>(font.bold as u32)?;
@@ -511,7 +514,7 @@ where
     Ok(())
 }
 
-// Writes an Room (uncompressed data)
+// Writes a Room (uncompressed data)
 pub fn write_room<W>(writer: &mut W, room: &asset::Room, _: GameVersion) -> io::Result<()>
 where
     W: io::Write,
@@ -660,12 +663,12 @@ pub fn write_included_files<W>(writer: &mut W, files: &[asset::IncludedFile]) ->
 where
     W: io::Write,
 {
-    writer.write_u32::<LE>(800)?;
+    writer.write_u32::<LE>(BLOCK_VERSION)?;
     writer.write_u32::<LE>(files.len() as u32)?;
     for file in files {
         let mut enc = ZlibWriter::new();
         write_timestamp(&mut enc)?;
-        enc.write_u32::<LE>(800)?;
+        enc.write_u32::<LE>(BLOCK_VERSION)?;
         enc.write_pas_string(&file.file_name)?;
         enc.write_pas_string(&file.source_path)?;
         enc.write_u32::<LE>(file.data_exists as u32)?;
@@ -719,8 +722,7 @@ pub fn write_game_information<W>(writer: &mut W, info: &GameHelpDialog) -> io::R
 where
     W: io::Write,
 {
-    writer.write_u32::<LE>(800)?; // TODO: why is this hardcoded?? come on adam
-    // maybe others are too ?
+    writer.write_u32::<LE>(BLOCK_VERSION)?;
     let mut enc = ZlibWriter::new();
     enc.write_u32::<LE>(info.bg_colour.into())?;
     enc.write_u32::<LE>(info.new_window as u32)?;

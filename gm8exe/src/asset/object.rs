@@ -104,12 +104,19 @@ impl Asset for Object {
         writer.write_u32::<LE>(self.persistent.into())?;
         writer.write_i32::<LE>(self.parent_index)?;
         writer.write_i32::<LE>(self.mask_index)?;
-        writer.write_u32::<LE>((self.events.len() - 1) as u32)?; // TODO: checks! cast checks too!
+        // GM8 stores the event-list count as (n - 1); the reader reads 0..=n inclusive (so 12 lists total).
+        writer.write_u32::<LE>(
+            u32::try_from(self.events.len().saturating_sub(1))
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?,
+        )?;
         for sub_list in self.events.iter() {
             for (sub, actions) in sub_list.iter() {
                 writer.write_u32::<LE>(*sub)?;
                 writer.write_u32::<LE>(VERSION_EVENT)?;
-                writer.write_u32::<LE>(actions.len() as u32)?;
+                writer.write_u32::<LE>(
+                    u32::try_from(actions.len())
+                        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?,
+                )?;
                 for action in actions.iter() {
                     action.serialize_exe(&mut writer, version)?;
                 }

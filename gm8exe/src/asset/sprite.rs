@@ -136,12 +136,18 @@ impl Asset for Sprite {
         writer.write_i32::<LE>(self.origin_x)?;
         writer.write_i32::<LE>(self.origin_y)?;
         if !self.frames.is_empty() {
-            writer.write_u32::<LE>(self.frames.len() as u32)?; // TODO: len as u32
+            writer.write_u32::<LE>(
+                u32::try_from(self.frames.len())
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?,
+            )?;
             for frame in self.frames.iter() {
                 writer.write_u32::<LE>(VERSION_FRAME)?;
                 writer.write_u32::<LE>(frame.width)?;
                 writer.write_u32::<LE>(frame.height)?;
-                writer.write_u32::<LE>(frame.data.len() as u32)?;
+                writer.write_u32::<LE>(
+                    u32::try_from(frame.data.len())
+                        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?,
+                )?;
                 let pixeldata = frame.data.clone();
                 writer.write_all(&pixeldata)?;
             }

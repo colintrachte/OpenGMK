@@ -38,7 +38,6 @@ struct GMRoomSave {
     persistent: bool,
     bgcol: Colour,
     show_bgcol: bool,
-    show_windowcol: bool,
     // TODO room creation code
     backgrounds: Vec<Background>,
     views_enabled: bool,
@@ -69,7 +68,6 @@ impl GMSave {
                 persistent: game.room.persistent,
                 bgcol: game.room.colour,
                 show_bgcol: game.room.show_colour,
-                show_windowcol: true, // TODO:
                 backgrounds: game.room.backgrounds.clone(),
                 views_enabled: game.room.views_enabled,
                 views: game.room.views.clone(),
