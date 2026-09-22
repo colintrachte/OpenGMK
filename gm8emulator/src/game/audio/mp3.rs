@@ -36,6 +36,7 @@ impl Clone for RawDecoderWrap {
 }
 
 pub enum Error {
+    #[allow(dead_code)]
     InvalidFile,
     InvalidDetails,
     NoDetails,

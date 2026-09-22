@@ -148,6 +148,23 @@ where
         .transpose()?
         .flatten();
 
+    // GM6.0/6.1 and GM7.0 use an entirely different gamedata layout than GM8.0/8.1 (different
+    // header, cipher and per-asset binary schemas), so they're detected and fully parsed by
+    // dedicated modules rather than the GM8-specific code below. Output is normalized to
+    // GameVersion::GameMaker8_0 so the rest of the toolchain doesn't need to know they exist.
+    {
+        let raw: &[u8] = exe.get_ref();
+        if gamedata::gm5::detect(raw).is_some() {
+            return gamedata::gm5::parse(raw, ico_file_raw, strict)
+        }
+        if gamedata::gm6::detect(raw).is_some() {
+            return gamedata::gm6::parse(raw, ico_file_raw, strict)
+        }
+        if gamedata::gm7::detect(raw).is_some() {
+            return gamedata::gm7::parse(raw, ico_file_raw, strict)
+        }
+    }
+
     // Decide if UPX is in use based on PE section names
     // This is None if there is no UPX, obviously, otherwise it's (max_size, offset_on_disk)
     let upx_data: Option<(u32, u32)> = match upx0_virtual_len {
@@ -752,5 +769,6 @@ where
         settings,
         game_id,
         guid,
+        raw_project: None,
     })
 }

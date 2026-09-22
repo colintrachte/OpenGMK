@@ -2,6 +2,7 @@ use crate::{gml::Value, math::Real};
 use serde::{Deserialize, Serialize};
 use std::{cmp::Ordering, collections};
 
+#[allow(dead_code)]
 pub type Result<T> = std::result::Result<T, Error>;
 
 pub type Stack = Vec<Value>;

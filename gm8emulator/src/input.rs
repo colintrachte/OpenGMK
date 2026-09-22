@@ -1412,6 +1412,7 @@ impl Input {
     }
 
     #[inline]
+    #[allow(dead_code)]
     pub fn mouse_check_button_pressed_any(&self) -> bool {
         self.mouse_check_button_pressed(MB_ANY)
     }
@@ -1422,6 +1423,7 @@ impl Input {
     }
 
     #[inline]
+    #[allow(dead_code)]
     pub fn mouse_check_button_released_any(&self) -> bool {
         self.mouse_check_button_released(MB_ANY)
     }
@@ -1469,6 +1471,7 @@ impl Input {
     }
 
     /// Hard reset, clearing all state.
+    #[allow(dead_code)]
     pub fn reset(&mut self) {
         *self = Self::new();
     }

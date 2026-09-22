@@ -3,7 +3,6 @@ use crate::{
     game::{Game, GameClock, GetAsset, SceneChange, Version},
     gml::{
         self,
-        datetime::DateTime,
         mappings::{self, constants as gml_constants},
         Context, InstanceVariable, Value,
     },
@@ -12,10 +11,7 @@ use crate::{
 };
 use gml_parser::token::Operator;
 use serde::{Deserialize, Serialize};
-use std::{
-    fmt::{self, Display},
-    time,
-};
+use std::fmt::{self, Display};
 
 const DEFAULT_ALARM: i32 = -1;
 

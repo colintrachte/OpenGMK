@@ -68,6 +68,7 @@ impl<T, const LEN: usize> HandleArray<T, LEN> {
         Self([Self::NONE_INIT; LEN])
     }
 
+    #[allow(dead_code)]
     pub fn get(&self, index: i32) -> Option<&T> {
         self.0.get(usize::try_from(index).ok()?)?.as_ref()
     }

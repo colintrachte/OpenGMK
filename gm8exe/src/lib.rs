@@ -60,6 +60,7 @@ pub struct GameAssets {
     pub settings: Settings,
     pub game_id: u32,
     pub guid: [u32; 4],
+    pub raw_project: Option<Vec<u8>>,
 }
 
 #[derive(Copy, Clone, Debug)]

@@ -4,6 +4,7 @@
 **/*.bin
 **/*.gmk
 **/*.gm81
+**/*.gmd
 
 # editor stuff
 /.idea/

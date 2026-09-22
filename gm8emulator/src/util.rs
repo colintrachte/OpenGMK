@@ -1,10 +1,12 @@
 /// Converts BGRA pixeldata to RGBA pixeldata in-place.
+#[allow(dead_code)]
 pub fn bgra2rgba(data: &mut [u8]) {
     assert_eq!(data.len() % 4, 0);
     data.chunks_exact_mut(4).for_each(|chunk| chunk.swap(0, 2));
 }
 
 /// Converts RGBA pixeldata to BGRA pixeldata in-place.
+#[allow(unused_imports)]
 pub use bgra2rgba as rgba2bgra;
 
 // Helper fn: rotate mutable x and y around a center point, given sin and cos of the angle to rotate by

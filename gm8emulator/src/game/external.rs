@@ -21,6 +21,7 @@ pub use native::NativeExternal;
 
 pub enum Call {
     Dummy(gml::Value),
+    #[allow(dead_code)]
     Emulated(Function),
     Native(NativeExternal),
     Ipc(ipc::IpcExternal),

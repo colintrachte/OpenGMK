@@ -54,7 +54,7 @@ fn main() {
     let args: Vec<String> = env::args().collect();
     assert!(!args.is_empty());
     let process_path = args[0].as_str();
-    let should_pause = is_cmd(process_path);
+    let should_pause = is_cmd(process_path) && !args.iter().any(|a| a == "-y" || a == "--no-pause");
 
     // set up getopts to parse our command line args
     let mut opts = getopts::Options::new();
@@ -64,6 +64,7 @@ fn main() {
         .optopt("d", "deobfuscate", "set deobfuscation mode auto/on/off (default=auto)", "")
         .optflag("p", "preserve", "preserve broken events (instead of trying to fix them)")
         .optflag("s", "singlethread", "decompile gamedata synchronously (lower RAM usage)")
+        .optflag("y", "no-pause", "never wait for keypress on exit")
         .optopt("o", "output", "specify output filename", "FILE");
 
     // parse command line arguments
@@ -100,6 +101,7 @@ Options:
     -d, --deobfuscate <mode>  set deobfuscation mode auto/on/off (defaults to auto)
     -p, --preserve            preserve broken events (instead of trying to fix them)
     -s, --singlethread        decompile gamedata synchronously (lower RAM usage)
+    -y, --no-pause            never wait for keypress on exit
     -o, --output <file>       specify output filename",
             process_path
         );
@@ -283,6 +285,19 @@ fn decompile(
             path
         },
     };
+
+    if let Some(ref raw) = assets.raw_project {
+        if out_path.extension().and_then(|oss| oss.to_str()) == Some("gmd") {
+            println!("Writing extracted GameMaker project to '{}'...", out_path.display());
+            fs::write(&out_path, raw).map_err(|e| format!("Failed to write '{}': {}", out_path.display(), e))?;
+            println!("Decompilation finished successfully! (Extracted {} bytes)", raw.len());
+            return Ok(());
+        }
+        let mut gmd_path = out_path.clone();
+        gmd_path.set_extension("gmd");
+        println!("Note: Extracted native GameMaker project to '{}' (can be opened in GameMaker / LateralGM).", gmd_path.display());
+        let _ = fs::write(&gmd_path, raw);
+    }
 
     if deobfuscate {
         deobfuscate::process(&mut assets);

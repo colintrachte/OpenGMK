@@ -39,6 +39,7 @@ impl FrameRng {
         }
     }
 
+    #[allow(dead_code)]
     pub fn decrease(&mut self) -> bool {
         *self = match self {
             FrameRng::Increment(amount) => if *amount <= 1 { FrameRng::Increment(0) } else { FrameRng::Increment(*amount-1) }

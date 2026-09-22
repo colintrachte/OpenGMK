@@ -1,6 +1,10 @@
 pub mod antidec;
+pub mod gm5;
+pub mod gm6;
+pub mod gm7;
 pub mod gm80;
 pub mod gm81;
+pub mod legacy;
 
 use crate::{reader::ReaderError, upx, GameVersion};
 use std::io::{self, Seek, SeekFrom};

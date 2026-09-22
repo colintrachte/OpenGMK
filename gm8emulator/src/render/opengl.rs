@@ -288,6 +288,7 @@ impl From<AtlasRect> for [f32; 4] {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 struct LightUniform {
     enabled: GLint,
     is_point: GLint,

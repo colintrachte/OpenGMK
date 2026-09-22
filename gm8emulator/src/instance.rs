@@ -19,6 +19,7 @@ const BBOX_DEFAULT: i32 = -100000;
 // Rust can't represent this many decimal places yet I think. It's a TBYTE (10 bytes - 80-bit x87)
 // definition in GM, except one that's used for `pi` constant, which is f64 and has an accurate 1:1
 // representation (see `mappings.rs`).
+#[allow(dead_code)]
 const PI: f64 = 3.1415926535897932380;
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]

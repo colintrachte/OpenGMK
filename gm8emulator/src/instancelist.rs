@@ -78,6 +78,7 @@ impl<T> ChunkList<T> {
         }
     }
 
+    #[allow(dead_code)]
     fn iter(&self) -> impl Iterator<Item = &Chunk<T>> {
         self.0.iter()
     }
@@ -128,6 +129,7 @@ impl<T> ChunkList<T> {
         output
     }
 
+    #[allow(dead_code)]
     fn clear(&mut self) {
         for chunk in self.iter_mut() {
             for slot in chunk.slots.iter_mut() {
@@ -364,6 +366,7 @@ impl InstanceList {
         }
     }
 
+    #[allow(dead_code)]
     pub fn obj_count_hint(&mut self, n: usize) {
         self.object_id_map.reserve((n as isize - self.object_id_map.len() as isize).max(0) as usize);
     }
@@ -451,6 +454,7 @@ impl TileList {
         }
     }
 
+    #[allow(dead_code)]
     pub fn clear(&mut self) {
         self.chunks.clear();
         self.draw_order.clear();

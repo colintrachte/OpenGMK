@@ -26,6 +26,7 @@ impl Random {
 
     /// Creates a new LCG with a given seed.
     #[inline]
+    #[allow(dead_code)]
     pub const fn with_seed(seed: i32) -> Self {
         Self(seed)
     }
