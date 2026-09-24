@@ -1353,16 +1353,34 @@ function Start-ProcessFile {
 
     # Warn if GameMaker Studio file detected
     if ($analysis.Short -eq "GMS") {
-        $utmtExe = Join-Path $ScriptDir "..\UndertaleModTool\UndertaleModTool.exe"
-        if (-not (Test-Path -LiteralPath $utmtExe -PathType Leaf)) {
-            $utmtExe = "C:\Sandbox\tools\UndertaleModTool\UndertaleModTool.exe"
+        # Guaranteed relative path to gmtool launcher and canonical utmt location
+        $gmtoolPy = Join-Path $ScriptDir "..\gmtool\gmtool.py"
+        $hasGmtool = Test-Path -LiteralPath $gmtoolPy -PathType Leaf
+
+        # Check canonical UTMT relative location within gmtool
+        $utmtCandidate = Join-Path $ScriptDir "..\gmtool\utmt\UndertaleModTool\bin\Release\net10.0-windows\publish\UndertaleModTool.exe"
+        if (-not (Test-Path -LiteralPath $utmtCandidate -PathType Leaf)) {
+            $utmtCandidate = Join-Path $ScriptDir "..\gmtool\utmt\UndertaleModTool.exe"
         }
-        $hasUtmt = Test-Path -LiteralPath $utmtExe -PathType Leaf
+        $hasUtmt = Test-Path -LiteralPath $utmtCandidate -PathType Leaf
+
         if ($hasUtmt) {
             Show-NotificationDrawer -Type "Warning" -Title "GameMaker Studio Executable Detected" `
                 -Message "This file contains an IFF FORM chunk (data.win container). Legacy GMK decompilers cannot reconstruct Studio bytecode. Click below to open directly in UndertaleModTool." `
                 -Action1Text "Open in UndertaleModTool" -Action1Script {
-                    Start-Process -FilePath $utmtExe -ArgumentList "`"$FilePath`""
+                    if ($hasGmtool) {
+                        Start-Process -FilePath "python" -ArgumentList "`"$gmtoolPy`" utmt open `"$FilePath`"" -WindowStyle Hidden
+                    } else {
+                        Start-Process -FilePath $utmtCandidate -ArgumentList "`"$FilePath`""
+                    }
+                } -ShowCopyLog
+        } elseif ($hasGmtool) {
+            Show-NotificationDrawer -Type "Warning" -Title "GameMaker Studio Executable Detected" `
+                -Message "This file contains an IFF FORM chunk (data.win container). UndertaleModTool is required to inspect Studio bytecode. Click below to retrieve and launch UTMT on demand." `
+                -Action1Text "Sync & Launch UTMT" -Action1Script {
+                    Start-Process -FilePath "python" -ArgumentList "`"$gmtoolPy`" utmt sync" -Wait -WindowStyle Hidden
+                    Start-Process -FilePath "python" -ArgumentList "`"$gmtoolPy`" utmt build --project UndertaleModTool" -Wait -WindowStyle Hidden
+                    Start-Process -FilePath "python" -ArgumentList "`"$gmtoolPy`" utmt open `"$FilePath`"" -WindowStyle Hidden
                 } -ShowCopyLog
         } else {
             Show-NotificationDrawer -Type "Warning" -Title "GameMaker Studio Executable Detected" `
