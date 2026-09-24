@@ -38,7 +38,7 @@ function Get-DecompilerExe {
         (Join-Path $ScriptDir "gm8decompiler.exe")
     )
     foreach ($cand in $candidates) {
-        if (Test-Path $cand) { return $cand }
+        if (Test-Path -LiteralPath $cand -PathType Leaf) { return $cand }
     }
     return $null
 }
@@ -49,11 +49,11 @@ function Get-DecompilerExe {
 function Analyze-GameMakerBinary {
     param([string]$FilePath)
 
-    if (-not (Test-Path $FilePath)) {
+    if (-not (Test-Path -LiteralPath $FilePath -PathType Leaf)) {
         return @{ Error = "File not found: $FilePath" }
     }
 
-    $fileInfo = Get-Item $FilePath
+    $fileInfo = Get-Item -LiteralPath $FilePath
     $fileLength = $fileInfo.Length
     if ($fileLength -lt 0x40) {
         return @{ Version = "Corrupt File"; Short = "INVALID"; Confidence = "0%"; Reason = "File too small (<64 bytes)" }
@@ -292,7 +292,7 @@ function Test-DecompileHealth {
         [int]$ExitCode
     )
 
-    if (-not (Test-Path $OutputFile)) {
+    if (-not (Test-Path -LiteralPath $OutputFile -PathType Leaf)) {
         return @{
             Healthy = $false
             Reason = "Output file was not created by the decompiler"
@@ -300,8 +300,18 @@ function Test-DecompileHealth {
         }
     }
 
-    $outInfo = Get-Item $OutputFile
+    $outInfo = Get-Item -LiteralPath $OutputFile
     $outSize = $outInfo.Length
+
+    # A non-zero exit status is authoritative. A failed writer may leave a large,
+    # superficially plausible partial project behind.
+    if ($ExitCode -ne 0) {
+        return @{
+            Healthy = $false
+            Reason = "Decompiler process failed with exit code $ExitCode"
+            Size = $outSize
+        }
+    }
 
     # Check 1: Empty file
     if ($outSize -eq 0) {
@@ -330,11 +340,36 @@ function Test-DecompileHealth {
         }
     }
 
-    # Check 4: Non-zero exit code when output is questionable
-    if ($ExitCode -ne 0 -and $outSize -lt 10000) {
+    # Check 4: Validate the project magic and version rather than trusting size alone.
+    try {
+        $stream = [System.IO.File]::OpenRead($OutputFile)
+        $reader = [System.IO.BinaryReader]::new($stream)
+        try {
+            if ($stream.Length -lt 8) { throw "Project header is truncated" }
+            $magic = $reader.ReadUInt32()
+            $version = $reader.ReadUInt32()
+        } finally {
+            $reader.Dispose()
+        }
+    } catch {
         return @{
             Healthy = $false
-            Reason = "Decompiler process failed (exit code $ExitCode) with undersized output ($outSize bytes)"
+            Reason = "Could not read project header: $($_.Exception.Message)"
+            Size = $outSize
+        }
+    }
+
+    $extension = [System.IO.Path]::GetExtension($OutputFile).ToLowerInvariant()
+    $validVersions = switch ($extension) {
+        ".gmd" { @(500, 510, 530) }
+        ".gmk" { @(800) }
+        ".gm81" { @(810) }
+        default { @() }
+    }
+    if ($magic -ne 1234321 -or $version -notin $validVersions) {
+        return @{
+            Healthy = $false
+            Reason = "Invalid $extension project header (magic $magic, version $version)"
             Size = $outSize
         }
     }
@@ -396,8 +431,67 @@ function Invoke-DirectGm5Extraction {
     }
 }
 
+function Invoke-CapturedProcess {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Diagnostics.ProcessStartInfo]$StartInfo,
+        [Parameter(Mandatory = $true)]
+        [scriptblock]$LogCallback,
+        [string]$OutputPrefix = "stdout",
+        [string]$ErrorPrefix = "stderr"
+    )
+
+    $proc = [System.Diagnostics.Process]::new()
+    $proc.StartInfo = $StartInfo
+    try {
+        if (-not $proc.Start()) {
+            throw "Failed to start process '$($StartInfo.FileName)'."
+        }
+        if ($StartInfo.RedirectStandardInput) {
+            $proc.StandardInput.Close()
+        }
+
+        # Drain both streams concurrently. Reading either stream to completion first can
+        # deadlock when the child fills the other redirected pipe.
+        $stdoutTask = $proc.StandardOutput.ReadToEndAsync()
+        $stderrTask = $proc.StandardError.ReadToEndAsync()
+        $proc.WaitForExit()
+        [System.Threading.Tasks.Task]::WaitAll([System.Threading.Tasks.Task[]]@($stdoutTask, $stderrTask))
+
+        foreach ($line in ($stdoutTask.Result -split "`r?`n")) {
+            if ($line.Trim()) { & $LogCallback "    [$OutputPrefix] $line" }
+        }
+        foreach ($line in ($stderrTask.Result -split "`r?`n")) {
+            if ($line.Trim()) { & $LogCallback "    [$ErrorPrefix] $line" }
+        }
+        return $proc.ExitCode
+    } finally {
+        $proc.Dispose()
+    }
+}
+
+function Get-AvailableOutputPath {
+    param([Parameter(Mandatory = $true)][string]$PreferredPath)
+
+    if (-not (Test-Path -LiteralPath $PreferredPath)) {
+        return $PreferredPath
+    }
+
+    $directory = [System.IO.Path]::GetDirectoryName($PreferredPath)
+    $stem = [System.IO.Path]::GetFileNameWithoutExtension($PreferredPath)
+    $extension = [System.IO.Path]::GetExtension($PreferredPath)
+    for ($suffix = 1; $suffix -le 10000; $suffix++) {
+        $label = if ($suffix -eq 1) { "${stem}_decompiled" } else { "${stem}_decompiled_$suffix" }
+        $candidate = Join-Path $directory ($label + $extension)
+        if (-not (Test-Path -LiteralPath $candidate)) {
+            return $candidate
+        }
+    }
+    throw "Could not allocate a non-conflicting output path for '$PreferredPath'."
+}
+
 # ---------------------------------------------------------------------------------------
-# Cascading Strategy Pipeline Execution with Real-Time Streaming
+# Cascading Strategy Pipeline Execution with deadlock-safe process capture
 # ---------------------------------------------------------------------------------------
 function Invoke-DecompilationPipeline {
     param(
@@ -405,7 +499,6 @@ function Invoke-DecompilationPipeline {
         [hashtable]$Analysis,
         [scriptblock]$LogCallback,
         [scriptblock]$StatusCallback,
-        [string]$EngineOverride = "Auto",
         [string]$ModeOverride = "Auto"
     )
 
@@ -416,52 +509,10 @@ function Invoke-DecompilationPipeline {
         return @{ Success = $false; Error = "gm8decompiler.exe not found" }
     }
 
-    # Apply Engine Override if selected
-    $effectiveAnalysis = @{}
-    foreach ($k in $Analysis.Keys) { $effectiveAnalysis[$k] = $Analysis[$k] }
-
-    switch ($EngineOverride) {
-        "GameMaker 7.0" {
-            $effectiveAnalysis.Version = "GameMaker 7.0"
-            $effectiveAnalysis.Short = "GM7"
-            $effectiveAnalysis.Strategy = "GM7"
-            $effectiveAnalysis.RecommendedExt = ".gmk"
-            & $LogCallback "[OVERRIDE] Forcing Engine Version: GameMaker 7.0"
-        }
-        "GameMaker 8.0" {
-            $effectiveAnalysis.Version = "GameMaker 8.0"
-            $effectiveAnalysis.Short = "GM80"
-            $effectiveAnalysis.Strategy = "GM80"
-            $effectiveAnalysis.RecommendedExt = ".gmk"
-            & $LogCallback "[OVERRIDE] Forcing Engine Version: GameMaker 8.0"
-        }
-        "GameMaker 8.1" {
-            $effectiveAnalysis.Version = "GameMaker 8.1"
-            $effectiveAnalysis.Short = "GM81"
-            $effectiveAnalysis.Strategy = "GM81"
-            $effectiveAnalysis.RecommendedExt = ".gm81"
-            & $LogCallback "[OVERRIDE] Forcing Engine Version: GameMaker 8.1"
-        }
-        "GameMaker 6.0 / 6.1" {
-            $effectiveAnalysis.Version = "GameMaker 6.0 / 6.1"
-            $effectiveAnalysis.Short = "GM6"
-            $effectiveAnalysis.Strategy = "GM6"
-            $effectiveAnalysis.RecommendedExt = ".gmk"
-            & $LogCallback "[OVERRIDE] Forcing Engine Version: GameMaker 6.0 / 6.1"
-        }
-        "GameMaker 5.0 / 5.3" {
-            $effectiveAnalysis.Version = "GameMaker 5.0 / 5.3"
-            $effectiveAnalysis.Short = "GM5"
-            $effectiveAnalysis.Strategy = "GM5"
-            $effectiveAnalysis.RecommendedExt = ".gmd"
-            & $LogCallback "[OVERRIDE] Forcing Engine Version: GameMaker 5.0 / 5.3"
-        }
-    }
-
-    $inputInfo = Get-Item $ExePath
+    $inputInfo = Get-Item -LiteralPath $ExePath
     $exeDir = $inputInfo.DirectoryName
     $exeBaseName = [System.IO.Path]::GetFileNameWithoutExtension($ExePath)
-    $primaryExt = $effectiveAnalysis.RecommendedExt
+    $primaryExt = $Analysis.RecommendedExt
     if (-not $primaryExt) { $primaryExt = ".gmk" }
 
     # Define prioritized fallback strategy sequence
@@ -472,7 +523,7 @@ function Invoke-DecompilationPipeline {
             Name = "Attempt 1 (Standard Primary: $primaryExt)"
             Extension = $primaryExt
             Flags = @()
-            Description = "Standard decompiler pass for $($effectiveAnalysis.Version)"
+            Description = "Standard decompiler pass for $($Analysis.Version)"
         })
     } elseif ($ModeOverride -eq "Lazy Mode (-l)") {
         $strategies.Add(@{
@@ -501,7 +552,7 @@ function Invoke-DecompilationPipeline {
             Name = "Attempt 1 (Standard Primary: $primaryExt)"
             Extension = $primaryExt
             Flags = @()
-            Description = "Standard decompiler pass for $($effectiveAnalysis.Version)"
+            Description = "Standard decompiler pass for $($Analysis.Version)"
         })
 
         $strategies.Add(@{
@@ -532,45 +583,8 @@ function Invoke-DecompilationPipeline {
             Description = "Skips AST deobfuscation to avoid syntax transformer panics"
         })
 
-        if ($primaryExt -eq ".gmd") {
-            $strategies.Add(@{
-                Name = "Attempt 6 (Format Swap: .gmk)"
-                Extension = ".gmk"
-                Flags = @("-l", "-p")
-                Description = "Try writing output as GMK format"
-            })
-        } elseif ($primaryExt -eq ".gm81") {
-            $strategies.Add(@{
-                Name = "Attempt 6 (Format Swap: .gmk)"
-                Extension = ".gmk"
-                Flags = @("-l", "-p")
-                Description = "Try writing output as GM8.0 GMK format"
-            })
-        } else {
-            $strategies.Add(@{
-                Name = "Attempt 6 (Format Swap: .gmd)"
-                Extension = ".gmd"
-                Flags = @("-l", "-p")
-                Description = "Try writing output as legacy GMD format"
-            })
-        }
-
-        # Check for External Tools in tools/
-        $toolsDir = Join-Path $ScriptDir "tools"
-        if (Test-Path $toolsDir) {
-            $externalTools = Get-ChildItem -Path $toolsDir -Filter "*.exe" -File
-            foreach ($tool in $externalTools) {
-                $strategies.Add(@{
-                    Name = "External Tool: $($tool.Name)"
-                    ExternalExe = $tool.FullName
-                    Flags = @()
-                    Description = "External helper tool in tools/"
-                })
-            }
-        }
-
         # Direct payload extractor if GM5
-        if ($effectiveAnalysis.Short -eq "GM5" -and $effectiveAnalysis.SwapSeed) {
+        if ($Analysis.Short -eq "GM5" -and $Analysis.SwapSeed) {
             $strategies.Add(@{
                 Name = "Direct GMD Stream Decryptor"
                 IsDirectGm5 = $true
@@ -583,130 +597,88 @@ function Invoke-DecompilationPipeline {
     & $LogCallback "========================================================"
     & $LogCallback "Target Executable: $($inputInfo.FullName)"
     & $LogCallback "File Size: $([Math]::Round($inputInfo.Length / 1MB, 2)) MB ($($inputInfo.Length) bytes)"
-    & $LogCallback "Active Engine Profile: $($effectiveAnalysis.Version) (Confidence: $($effectiveAnalysis.Confidence))"
-    & $LogCallback "Technical Details: $($effectiveAnalysis.Details)"
+    & $LogCallback "Detected Engine: $($Analysis.Version) (Confidence: $($Analysis.Confidence))"
+    & $LogCallback "Technical Details: $($Analysis.Details)"
     & $LogCallback "Execution Queue: $($strategies.Count) strategies configured"
     & $LogCallback "========================================================"
 
     $attemptIndex = 0
     foreach ($strat in $strategies) {
         $attemptIndex++
-        $targetOut = Join-Path $exeDir "$exeBaseName$($strat.Extension)"
+        $preferredOut = Join-Path $exeDir "$exeBaseName$($strat.Extension)"
+        $tempName = ".${exeBaseName}.opengmk.$([Guid]::NewGuid().ToString('N'))$($strat.Extension)"
+        $targetOut = Join-Path $exeDir $tempName
 
         & $StatusCallback "Running $($strat.Name)..."
         & $LogCallback ""
         & $LogCallback ">>> [$attemptIndex/$($strategies.Count)] $($strat.Name)"
         & $LogCallback "    Description: $($strat.Description)"
-        & $LogCallback "    Target Output: $targetOut"
-
-        # If previous output exists and was a failure, remove it before this attempt
-        if (Test-Path $targetOut) {
-            Remove-Item $targetOut -Force -ErrorAction SilentlyContinue
-        }
+        & $LogCallback "    Staging Output: $targetOut"
 
         $exitCode = 0
         $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 
-        if ($strat.IsDirectGm5) {
-            & $LogCallback "    Executing direct cipher extraction..."
-            $directSuccess = Invoke-DirectGm5Extraction -ExePath $ExePath -OutputPath $targetOut -PayloadOffset $effectiveAnalysis.PayloadOffset -SwapSeed $effectiveAnalysis.SwapSeed
-            $stopwatch.Stop()
-            if (-not $directSuccess) { $exitCode = 1 }
-        } elseif ($strat.ExternalExe) {
-            & $LogCallback "    Launching external tool: $($strat.ExternalExe)..."
-            $psi = New-Object System.Diagnostics.ProcessStartInfo
-            $psi.FileName = $strat.ExternalExe
-            $psi.Arguments = "`"$ExePath`""
-            $psi.UseShellExecute = $false
-            $psi.RedirectStandardOutput = $true
-            $psi.RedirectStandardError = $true
-            $psi.CreateNoWindow = $true
+        try {
+            if ($strat.IsDirectGm5) {
+                & $LogCallback "    Executing direct cipher extraction..."
+                $directSuccess = Invoke-DirectGm5Extraction -ExePath $ExePath -OutputPath $targetOut -PayloadOffset $Analysis.PayloadOffset -SwapSeed $Analysis.SwapSeed
+                if (-not $directSuccess) { $exitCode = 1 }
+            } else {
+                # Run gm8decompiler with non-interactive flags. The GUI itself remains
+                # responsive because this pipeline executes in a dedicated runspace.
+                $argList = @("-y", "-o", "`"$targetOut`"")
+                if ($strat.Flags) { $argList += $strat.Flags }
+                $argList += "`"$ExePath`""
 
-            $proc = New-Object System.Diagnostics.Process
-            $proc.StartInfo = $psi
-            $proc.EnableRaisingEvents = $true
+                $argString = $argList -join " "
+                & $LogCallback "    Command: gm8decompiler $argString"
 
-            $proc.add_OutputDataReceived({
-                param($s, $e)
-                if ($e.Data) { & $LogCallback "    [tool] $($e.Data)" }
-            })
-            $proc.add_ErrorDataReceived({
-                param($s, $e)
-                if ($e.Data) { & $LogCallback "    [tool err] $($e.Data)" }
-            })
+                $psi = New-Object System.Diagnostics.ProcessStartInfo
+                $psi.FileName = $decompilerBin
+                $psi.Arguments = $argString
+                $psi.UseShellExecute = $false
+                $psi.RedirectStandardOutput = $true
+                $psi.RedirectStandardError = $true
+                $psi.RedirectStandardInput = $true
+                $psi.EnvironmentVariables["MSYSTEM"] = "1"
+                $psi.CreateNoWindow = $true
 
-            $proc.Start() | Out-Null
-            $proc.BeginOutputReadLine()
-            $proc.BeginErrorReadLine()
-            $proc.WaitForExit()
-            $exitCode = $proc.ExitCode
-            $stopwatch.Stop()
-        } else {
-            # Run gm8decompiler with non-interactive flags and asynchronous real-time streaming
-            $argList = @("-y", "-o", "`"$targetOut`"")
-            if ($strat.Flags) { $argList += $strat.Flags }
-            $argList += "`"$ExePath`""
-
-            $argString = $argList -join " "
-            & $LogCallback "    Command: gm8decompiler $argString"
-
-            $psi = New-Object System.Diagnostics.ProcessStartInfo
-            $psi.FileName = $decompilerBin
-            $psi.Arguments = $argString
-            $psi.UseShellExecute = $false
-            $psi.RedirectStandardOutput = $true
-            $psi.RedirectStandardError = $true
-            $psi.RedirectStandardInput = $true
-            $psi.EnvironmentVariables["MSYSTEM"] = "1"
-            $psi.CreateNoWindow = $true
-
-            $proc = New-Object System.Diagnostics.Process
-            $proc.StartInfo = $psi
-            $proc.EnableRaisingEvents = $true
-
-            $proc.add_OutputDataReceived({
-                param($s, $e)
-                if ($e.Data) { & $LogCallback "    [stdout] $($e.Data)" }
-            })
-            $proc.add_ErrorDataReceived({
-                param($s, $e)
-                if ($e.Data) { & $LogCallback "    [stderr] $($e.Data)" }
-            })
-
-            $proc.Start() | Out-Null
-            $proc.StandardInput.Close()
-            $proc.BeginOutputReadLine()
-            $proc.BeginErrorReadLine()
-            $proc.WaitForExit()
-            $exitCode = $proc.ExitCode
-            $stopwatch.Stop()
-        }
-
-        # Check Output Health
-        $health = Test-DecompileHealth -OutputFile $targetOut -InputExeLength $inputInfo.Length -ExitCode $exitCode
-        & $LogCallback "    Elapsed Time: $($stopwatch.ElapsedMilliseconds) ms"
-        & $LogCallback "    Health Status: $(if ($health.Healthy) { 'HEALTHY' } else { 'FAILED' }) - $($health.Reason)"
-
-        if ($health.Healthy) {
-            & $StatusCallback "SUCCESS: $($strat.Name)"
-            & $LogCallback ""
-            & $LogCallback "********************************************************"
-            & $LogCallback "  DECOMPILATION SUCCESSFUL!"
-            & $LogCallback "  Strategy: $($strat.Name)"
-            & $LogCallback "  Output File: $targetOut"
-            & $LogCallback "  Output Size: $([Math]::Round($health.Size / 1MB, 2)) MB ($($health.Size) bytes)"
-            & $LogCallback "********************************************************"
-
-            return @{
-                Success = $true
-                Strategy = $strat.Name
-                OutputFile = $targetOut
-                OutputSize = $health.Size
-                ExitCode = $exitCode
-                ElapsedMs = $stopwatch.ElapsedMilliseconds
+                $exitCode = Invoke-CapturedProcess -StartInfo $psi -LogCallback $LogCallback
             }
-        } else {
-            & $LogCallback "    Attempt failed. Cascading to next fallback strategy..."
+            $stopwatch.Stop()
+
+            # Check staged output before publishing it under a user-visible name.
+            $health = Test-DecompileHealth -OutputFile $targetOut -InputExeLength $inputInfo.Length -ExitCode $exitCode
+            & $LogCallback "    Elapsed Time: $($stopwatch.ElapsedMilliseconds) ms"
+            & $LogCallback "    Health Status: $(if ($health.Healthy) { 'HEALTHY' } else { 'FAILED' }) - $($health.Reason)"
+
+            if ($health.Healthy) {
+                $publishedOut = Get-AvailableOutputPath -PreferredPath $preferredOut
+                [System.IO.File]::Move($targetOut, $publishedOut)
+                & $StatusCallback "SUCCESS: $($strat.Name)"
+                & $LogCallback ""
+                & $LogCallback "********************************************************"
+                & $LogCallback "  DECOMPILATION SUCCESSFUL!"
+                & $LogCallback "  Strategy: $($strat.Name)"
+                & $LogCallback "  Output File: $publishedOut"
+                & $LogCallback "  Output Size: $([Math]::Round($health.Size / 1MB, 2)) MB ($($health.Size) bytes)"
+                & $LogCallback "********************************************************"
+
+                return @{
+                    Success = $true
+                    Strategy = $strat.Name
+                    OutputFile = $publishedOut
+                    OutputSize = $health.Size
+                    ExitCode = $exitCode
+                    ElapsedMs = $stopwatch.ElapsedMilliseconds
+                }
+            } else {
+                & $LogCallback "    Attempt failed. Cascading to next fallback strategy..."
+            }
+        } finally {
+            if (Test-Path -LiteralPath $targetOut) {
+                Remove-Item -LiteralPath $targetOut -Force -ErrorAction SilentlyContinue
+            }
         }
     }
 
@@ -897,16 +869,6 @@ if ($NonInteractiveTest) {
                             <ColumnDefinition Width="Auto"/>
                         </Grid.ColumnDefinitions>
                         <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                            <TextBlock Text="ENGINE OVERRIDE: " FontSize="11" FontWeight="Bold" Foreground="#6C7086" VerticalAlignment="Center"/>
-                            <ComboBox x:Name="CmbEngineOverride" Width="185" Height="26" Margin="4,0,12,0" FontSize="11">
-                                <ComboBoxItem Content="Auto-Detect (Heuristic)" IsSelected="True"/>
-                                <ComboBoxItem Content="GameMaker 7.0"/>
-                                <ComboBoxItem Content="GameMaker 8.0"/>
-                                <ComboBoxItem Content="GameMaker 8.1"/>
-                                <ComboBoxItem Content="GameMaker 6.0 / 6.1"/>
-                                <ComboBoxItem Content="GameMaker 5.0 / 5.3"/>
-                            </ComboBox>
-
                             <TextBlock Text="MODE: " FontSize="11" FontWeight="Bold" Foreground="#6C7086" VerticalAlignment="Center"/>
                             <ComboBox x:Name="CmbExtractionMode" Width="150" Height="26" Margin="4,0,8,0" FontSize="11">
                                 <ComboBoxItem Content="Cascading (Auto)" IsSelected="True"/>
@@ -1013,7 +975,6 @@ $txtConfidence = $window.FindName("TxtConfidence")
 $txtDetails = $window.FindName("TxtDetails")
 $badgeStatus = $window.FindName("BadgeStatus")
 $txtStatus = $window.FindName("TxtStatus")
-$cmbEngineOverride = $window.FindName("CmbEngineOverride")
 $cmbExtractionMode = $window.FindName("CmbExtractionMode")
 $btnReRun = $window.FindName("BtnReRun")
 $notificationDrawer = $window.FindName("NotificationDrawer")
@@ -1033,10 +994,17 @@ $btnOpenFile = $window.FindName("BtnOpenFile")
 
 $activeOutputFile = $null
 $currentLoadedFile = $null
-$cachedAnalysis = $null
 $isProcessing = $false
 $drawerAction1Handler = $null
 $drawerAction2Handler = $null
+$pipelinePowerShell = $null
+$pipelineRunspace = $null
+$pipelineAsync = $null
+$pipelineEvents = $null
+$pipelineTerminalReceived = $false
+
+$pipelineTimer = [System.Windows.Threading.DispatcherTimer]::new()
+$pipelineTimer.Interval = [TimeSpan]::FromMilliseconds(100)
 
 # Helper for thread-safe UI updates
 function Append-LogLine {
@@ -1177,6 +1145,160 @@ $btnDrawerCopyLog.Add_Click({
     } catch {}
 })
 
+function Complete-PipelineUi {
+    param([hashtable]$Result)
+
+    if ($Result.Success) {
+        $script:activeOutputFile = $Result.OutputFile
+        Update-PipelineStatus "SUCCESS" "#A6E3A1" "#11111B"
+        $txtFooter.Text = "Decompiled successfully to: $($Result.OutputFile)"
+        $btnOpenFolder.IsEnabled = $true
+        $btnOpenFile.IsEnabled = $true
+
+        Show-NotificationDrawer -Type "Success" -Title "Decompilation Completed" `
+            -Message "Extracted via $($Result.Strategy) ($([Math]::Round($Result.OutputSize / 1MB, 2)) MB in $($Result.ElapsedMs) ms)." `
+            -Action1Text "Open Output Folder" -Action1Script {
+                if ($script:activeOutputFile) { Start-Process "explorer.exe" -ArgumentList "/select,`"$($script:activeOutputFile)`"" }
+            } `
+            -Action2Text "Open Project" -Action2Script {
+                if ($script:activeOutputFile) { Start-Process $script:activeOutputFile }
+            }
+    } else {
+        Update-PipelineStatus "FAILED" "#F38BA8" "#11111B"
+        $txtFooter.Text = "Decompilation failed across all fallback strategies."
+        Show-NotificationDrawer -Type "Error" -Title "Decompilation Incomplete" `
+            -Message "All safe fallback strategies were exhausted. Review the diagnostic log, then retry with Lazy or Preserve mode if appropriate." `
+            -Action1Text "Try Lazy Mode (-l)" -Action1Script {
+                $cmbExtractionMode.SelectedIndex = 2
+                Start-ProcessFile -FilePath $script:currentLoadedFile
+            } `
+            -Action2Text "Try Preserve Mode (-p)" -Action2Script {
+                $cmbExtractionMode.SelectedIndex = 3
+                Start-ProcessFile -FilePath $script:currentLoadedFile
+            } `
+            -ShowCopyLog
+    }
+}
+
+function Complete-PipelineError {
+    param([string]$Message)
+
+    Append-LogLine "[FATAL ERROR] $Message"
+    Update-PipelineStatus "ERROR" "#F38BA8" "#11111B"
+    Show-NotificationDrawer -Type "Error" -Title "Execution Error" `
+        -Message "An unhandled exception occurred in the decompiler pipeline: $Message" `
+        -ShowCopyLog
+}
+
+function Close-PipelineWorker {
+    $pipelineTimer.Stop()
+    if ($script:pipelinePowerShell) {
+        $script:pipelinePowerShell.Dispose()
+        $script:pipelinePowerShell = $null
+    }
+    if ($script:pipelineRunspace) {
+        $script:pipelineRunspace.Dispose()
+        $script:pipelineRunspace = $null
+    }
+    $script:pipelineAsync = $null
+    $script:pipelineEvents = $null
+    $script:isProcessing = $false
+    $btnReRun.IsEnabled = $true
+}
+
+function Start-PipelineWorker {
+    param(
+        [string]$FilePath,
+        [hashtable]$Analysis,
+        [string]$ModeOverride
+    )
+
+    $initialState = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
+    foreach ($functionName in @(
+        "Get-DecompilerExe",
+        "Test-DecompileHealth",
+        "Invoke-DirectGm5Extraction",
+        "Invoke-CapturedProcess",
+        "Get-AvailableOutputPath",
+        "Invoke-DecompilationPipeline"
+    )) {
+        $definition = (Get-Item "function:$functionName").Definition
+        $entry = [System.Management.Automation.Runspaces.SessionStateFunctionEntry]::new($functionName, $definition)
+        $initialState.Commands.Add($entry)
+    }
+
+    $script:pipelineEvents = [System.Collections.Concurrent.ConcurrentQueue[object]]::new()
+    $script:pipelineTerminalReceived = $false
+    $script:pipelineRunspace = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace($initialState)
+    $script:pipelineRunspace.ApartmentState = [System.Threading.ApartmentState]::MTA
+    $script:pipelineRunspace.Open()
+    $script:pipelineRunspace.SessionStateProxy.SetVariable("ScriptDir", $ScriptDir)
+
+    $script:pipelinePowerShell = [System.Management.Automation.PowerShell]::Create()
+    $script:pipelinePowerShell.Runspace = $script:pipelineRunspace
+    $workerScript = {
+        param($WorkerFilePath, $WorkerAnalysis, $WorkerMode, $EventQueue)
+        $logBlock = {
+            param($message)
+            $EventQueue.Enqueue([pscustomobject]@{ Kind = "Log"; Message = [string]$message })
+        }
+        $statusBlock = {
+            param($message)
+            $EventQueue.Enqueue([pscustomobject]@{ Kind = "Status"; Message = [string]$message })
+        }
+        try {
+            $result = Invoke-DecompilationPipeline -ExePath $WorkerFilePath -Analysis $WorkerAnalysis `
+                -LogCallback $logBlock -StatusCallback $statusBlock -ModeOverride $WorkerMode
+            $EventQueue.Enqueue([pscustomobject]@{ Kind = "Result"; Value = $result })
+        } catch {
+            $EventQueue.Enqueue([pscustomobject]@{ Kind = "Error"; Message = ($_ | Out-String) })
+        }
+    }
+    $null = $script:pipelinePowerShell.AddScript($workerScript.ToString())
+    $null = $script:pipelinePowerShell.AddArgument($FilePath)
+    $null = $script:pipelinePowerShell.AddArgument($Analysis)
+    $null = $script:pipelinePowerShell.AddArgument($ModeOverride)
+    $null = $script:pipelinePowerShell.AddArgument($script:pipelineEvents)
+    $script:pipelineAsync = $script:pipelinePowerShell.BeginInvoke()
+    $pipelineTimer.Start()
+}
+
+$pipelineTimer.Add_Tick({
+    if (-not $script:pipelineEvents) { return }
+
+    $event = $null
+    while ($script:pipelineEvents.TryDequeue([ref]$event)) {
+        switch ($event.Kind) {
+            "Log" { Append-LogLine $event.Message }
+            "Status" { Update-PipelineStatus $event.Message }
+            "Result" {
+                $script:pipelineTerminalReceived = $true
+                Complete-PipelineUi -Result $event.Value
+            }
+            "Error" {
+                $script:pipelineTerminalReceived = $true
+                Complete-PipelineError -Message $event.Message
+            }
+        }
+        $event = $null
+    }
+
+    if ($script:pipelineAsync -and $script:pipelineAsync.IsCompleted) {
+        try {
+            $null = $script:pipelinePowerShell.EndInvoke($script:pipelineAsync)
+            if (-not $script:pipelineTerminalReceived) {
+                Complete-PipelineError -Message "The background pipeline ended without returning a result."
+            }
+        } catch {
+            if (-not $script:pipelineTerminalReceived) {
+                Complete-PipelineError -Message $_.Exception.Message
+            }
+        } finally {
+            Close-PipelineWorker
+        }
+    }
+})
+
 # Main Execution Trigger
 function Start-ProcessFile {
     param([string]$FilePath)
@@ -1186,7 +1308,7 @@ function Start-ProcessFile {
         return
     }
 
-    if (-not (Test-Path $FilePath)) {
+    if (-not (Test-Path -LiteralPath $FilePath -PathType Leaf)) {
         Append-LogLine "[ERROR] Selected path does not exist: $FilePath"
         Show-NotificationDrawer -Type "Error" -Title "File Not Found" -Message "Path does not exist: $FilePath"
         return
@@ -1201,14 +1323,13 @@ function Start-ProcessFile {
     Hide-NotificationDrawer
     $txtConsole.Clear()
 
-    $fileInfo = Get-Item $FilePath
+    $fileInfo = Get-Item -LiteralPath $FilePath
     $txtFileName.Text = $fileInfo.Name
     $txtFileSize.Text = " ($([Math]::Round($fileInfo.Length / 1MB, 2)) MB)"
     $analysisCard.Visibility = [System.Windows.Visibility]::Visible
 
     # Run binary inspection
     $analysis = Analyze-GameMakerBinary $FilePath
-    $script:cachedAnalysis = $analysis
     $txtBadgeVersion.Text = $analysis.Version
     $txtConfidence.Text = "Confidence: $($analysis.Confidence)"
     $txtDetails.Text = $analysis.Details
@@ -1227,75 +1348,35 @@ function Start-ProcessFile {
     Update-PipelineStatus "ANALYZING..." "#313244" "#89B4FA"
     $txtFooter.Text = "Decompiling $($fileInfo.Name)..."
 
-    # Extract user interactive overrides from ComboBoxes
-    $engineOverrideText = $cmbEngineOverride.Text
+    # Capture the selected fallback policy before entering the worker runspace.
     $modeOverrideText = $cmbExtractionMode.Text
 
     # Warn if GameMaker Studio file detected
     if ($analysis.Short -eq "GMS") {
-        Show-NotificationDrawer -Type "Warning" -Title "GameMaker Studio Executable Detected" `
-            -Message "This file contains an IFF FORM chunk (data.win container). Legacy GMK decompilers cannot reconstruct Studio bytecode. UndertaleModTool (UTMT) is recommended for Studio titles." `
-            -ShowCopyLog
+        $utmtExe = Join-Path $ScriptDir "..\UndertaleModTool\UndertaleModTool.exe"
+        if (-not (Test-Path -LiteralPath $utmtExe -PathType Leaf)) {
+            $utmtExe = "C:\Sandbox\tools\UndertaleModTool\UndertaleModTool.exe"
+        }
+        $hasUtmt = Test-Path -LiteralPath $utmtExe -PathType Leaf
+        if ($hasUtmt) {
+            Show-NotificationDrawer -Type "Warning" -Title "GameMaker Studio Executable Detected" `
+                -Message "This file contains an IFF FORM chunk (data.win container). Legacy GMK decompilers cannot reconstruct Studio bytecode. Click below to open directly in UndertaleModTool." `
+                -Action1Text "Open in UndertaleModTool" -Action1Script {
+                    Start-Process -FilePath $utmtExe -ArgumentList "`"$FilePath`""
+                } -ShowCopyLog
+        } else {
+            Show-NotificationDrawer -Type "Warning" -Title "GameMaker Studio Executable Detected" `
+                -Message "This file contains an IFF FORM chunk (data.win container). Legacy GMK decompilers cannot reconstruct Studio bytecode. UndertaleModTool (UTMT) is recommended for Studio titles." `
+                -ShowCopyLog
+        }
     }
 
-    # Run cascading decompiler pipeline on background thread
-    [System.Threading.Tasks.Task]::Run([Action]{
-        try {
-            $logBlock = { param($msg) Append-LogLine $msg }
-            $statusBlock = { param($msg) Update-PipelineStatus $msg }
-
-            $result = Invoke-DecompilationPipeline -ExePath $FilePath -Analysis $analysis `
-                -LogCallback $logBlock -StatusCallback $statusBlock `
-                -EngineOverride $engineOverrideText -ModeOverride $modeOverrideText
-
-            $window.Dispatcher.Invoke([Action]{
-                if ($result.Success) {
-                    $script:activeOutputFile = $result.OutputFile
-                    Update-PipelineStatus "SUCCESS" "#A6E3A1" "#11111B"
-                    $txtFooter.Text = "Decompiled successfully to: $($result.OutputFile)"
-                    $btnOpenFolder.IsEnabled = $true
-                    $btnOpenFile.IsEnabled = $true
-
-                    Show-NotificationDrawer -Type "Success" -Title "Decompilation Completed" `
-                        -Message "Extracted via $($result.Strategy) ($([Math]::Round($result.OutputSize / 1MB, 2)) MB in $($result.ElapsedMs) ms)." `
-                        -Action1Text "Open Output Folder" -Action1Script {
-                            if ($script:activeOutputFile) { Start-Process "explorer.exe" -ArgumentList "/select,`"$($script:activeOutputFile)`"" }
-                        } `
-                        -Action2Text "Open Project" -Action2Script {
-                            if ($script:activeOutputFile) { Start-Process "$($script:activeOutputFile)" }
-                        }
-                } else {
-                    Update-PipelineStatus "FAILED" "#F38BA8" "#11111B"
-                    $txtFooter.Text = "Decompilation failed across all fallback strategies."
-
-                    Show-NotificationDrawer -Type "Error" -Title "Decompilation Incomplete" `
-                        -Message "All fallback strategies exhausted. You can retry with Lazy mode (-l) to bypass asset checks, or force a different engine version above." `
-                        -Action1Text "Try Lazy Mode (-l)" -Action1Script {
-                            $cmbExtractionMode.SelectedIndex = 2
-                            Start-ProcessFile -FilePath $script:currentLoadedFile
-                        } `
-                        -Action2Text "Force GM8 Mode" -Action2Script {
-                            $cmbEngineOverride.SelectedIndex = 2
-                            Start-ProcessFile -FilePath $script:currentLoadedFile
-                        } `
-                        -ShowCopyLog
-                }
-                $script:isProcessing = $false
-                $btnReRun.IsEnabled = $true
-            })
-        } catch {
-            $err = $_
-            $window.Dispatcher.Invoke([Action]{
-                Append-LogLine "[FATAL ERROR] $err"
-                Update-PipelineStatus "ERROR" "#F38BA8" "#11111B"
-                $script:isProcessing = $false
-                $btnReRun.IsEnabled = $true
-                Show-NotificationDrawer -Type "Error" -Title "Execution Error" `
-                    -Message "An unhandled exception occurred in the decompiler pipeline: $err" `
-                    -ShowCopyLog
-            })
-        }
-    })
+    try {
+        Start-PipelineWorker -FilePath $FilePath -Analysis $analysis -ModeOverride $modeOverrideText
+    } catch {
+        Complete-PipelineError -Message $_.Exception.Message
+        Close-PipelineWorker
+    }
 }
 
 # Re-run Button in Analysis Card
@@ -1394,14 +1475,14 @@ $btnCopyLog.Add_Click({
 
 # Open Output Folder Button
 $btnOpenFolder.Add_Click({
-    if ($script:activeOutputFile -and (Test-Path $script:activeOutputFile)) {
+    if ($script:activeOutputFile -and (Test-Path -LiteralPath $script:activeOutputFile -PathType Leaf)) {
         Start-Process "explorer.exe" -ArgumentList "/select,`"$($script:activeOutputFile)`""
     }
 })
 
 # Open Project Button
 $btnOpenFile.Add_Click({
-    if ($script:activeOutputFile -and (Test-Path $script:activeOutputFile)) {
+    if ($script:activeOutputFile -and (Test-Path -LiteralPath $script:activeOutputFile -PathType Leaf)) {
         Start-Process $script:activeOutputFile
     }
 })
@@ -1425,14 +1506,23 @@ if ($InputExe) {
 
 # Set Window Icon if available
 $iconPath = Join-Path $ScriptDir "assets\logo\gm8dec.ico"
-if (-not (Test-Path $iconPath)) {
+if (-not (Test-Path -LiteralPath $iconPath -PathType Leaf)) {
     $iconPath = Join-Path $ScriptDir "assets\logo\opengmk.ico"
 }
-if (Test-Path $iconPath) {
+if (Test-Path -LiteralPath $iconPath -PathType Leaf) {
     try {
         $window.Icon = [System.Windows.Media.Imaging.BitmapFrame]::Create([System.Uri]::new($iconPath))
     } catch {}
 }
+
+$window.Add_Closing({
+    $pipelineTimer.Stop()
+    if ($script:pipelinePowerShell -and $script:pipelineAsync -and -not $script:pipelineAsync.IsCompleted) {
+        try { $script:pipelinePowerShell.Stop() } catch {}
+    }
+    if ($script:pipelinePowerShell) { $script:pipelinePowerShell.Dispose() }
+    if ($script:pipelineRunspace) { $script:pipelineRunspace.Dispose() }
+})
 
 # Show GUI
 $app = New-Object System.Windows.Application

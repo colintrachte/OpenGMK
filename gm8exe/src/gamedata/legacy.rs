@@ -42,6 +42,18 @@ pub(crate) fn read_bool(reader: &mut impl Read) -> io::Result<bool> {
 
 const MAX_SAFE_ALLOC_SIZE: usize = 128 * 1024 * 1024; // 128 MB safety ceiling
 const MAX_SAFE_STRING_SIZE: usize = 16 * 1024 * 1024; // 16 MB string ceiling
+const MAX_SAFE_COLLECTION_ITEMS: usize = 1_000_000;
+
+fn checked_count(value: u32, label: &str) -> io::Result<usize> {
+    let count = value as usize;
+    if count > MAX_SAFE_COLLECTION_ITEMS {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{label} count exceeds safety limit: {count}"),
+        ));
+    }
+    Ok(count)
+}
 
 pub(crate) fn read_pas_string_raw(reader: &mut impl Read) -> io::Result<PascalString> {
     let len = reader.read_u32::<LE>()? as usize;
@@ -68,21 +80,38 @@ pub(crate) fn skip_blob(reader: &mut impl Read) -> io::Result<()> {
     if len > MAX_SAFE_ALLOC_SIZE as u64 {
         return Err(io::Error::new(io::ErrorKind::InvalidData, format!("Blob skip length exceeds safety limit: {} bytes", len)));
     }
-    io::copy(&mut reader.take(len), &mut io::sink())?;
+    let copied = io::copy(&mut reader.take(len), &mut io::sink())?;
+    if copied != len {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            format!("Blob ended after {copied} bytes; expected {len}"),
+        ));
+    }
     Ok(())
 }
 
 /// Reads a u32-prefixed zlib-compressed chunk and inflates it.
 pub(crate) fn read_compressed(reader: &mut impl Read) -> io::Result<Vec<u8>> {
+    read_compressed_with_limit(reader, MAX_SAFE_ALLOC_SIZE)
+}
+
+fn read_compressed_with_limit(reader: &mut impl Read, output_limit: usize) -> io::Result<Vec<u8>> {
     let len = reader.read_u32::<LE>()? as usize;
     if len > MAX_SAFE_ALLOC_SIZE {
         return Err(io::Error::new(io::ErrorKind::InvalidData, format!("Compressed chunk length exceeds safety limit: {} bytes", len)));
     }
     let mut compressed = vec![0u8; len];
     reader.read_exact(&mut compressed)?;
-    let mut decoder = ZlibDecoder::new(compressed.as_slice());
+    let decoder = ZlibDecoder::new(compressed.as_slice());
+    let mut limited = decoder.take(output_limit as u64 + 1);
     let mut out = Vec::new();
-    decoder.read_to_end(&mut out)?;
+    limited.read_to_end(&mut out)?;
+    if out.len() > output_limit {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Decompressed chunk exceeds safety limit: {output_limit} bytes"),
+        ));
+    }
     Ok(out)
 }
 
@@ -294,8 +323,8 @@ pub(crate) fn read_settings(reader: &mut impl Read) -> Result<(Settings, Vec<Con
         (flags & 0x1 != 0, flags & 0x2 != 0, Vec::new())
     } else {
         let zero_uninit = read_bool(&mut item)?;
-        let constant_count = item.read_u32::<LE>()?;
-        let mut constants = Vec::with_capacity(constant_count as usize);
+        let constant_count = checked_count(item.read_u32::<LE>()?, "constant")?;
+        let mut constants = Vec::with_capacity(constant_count);
         for _ in 0..constant_count {
             let name = read_pas_string_raw(&mut item)?;
             let expression = read_pas_string_raw(&mut item)?;
@@ -393,8 +422,8 @@ pub(super) fn read_library_init_scripts(reader: &mut impl Read) -> Result<Vec<Pa
     if version != 500 {
         return Err(ReaderError::UnknownFormat)
     }
-    let count = reader.read_u32::<LE>()?;
-    let mut out = Vec::with_capacity(count as usize);
+    let count = checked_count(reader.read_u32::<LE>()?, "library initialization script")?;
+    let mut out = Vec::with_capacity(count);
     for _ in 0..count {
         out.push(read_pas_string_raw(reader)?);
     }
@@ -406,8 +435,8 @@ pub(super) fn read_room_order(reader: &mut impl Read) -> Result<Vec<i32>, Reader
     if version != 540 && version != 700 {
         return Err(ReaderError::UnknownFormat)
     }
-    let count = reader.read_u32::<LE>()?;
-    let mut out = Vec::with_capacity(count as usize);
+    let count = checked_count(reader.read_u32::<LE>()?, "room order")?;
+    let mut out = Vec::with_capacity(count);
     for _ in 0..count {
         out.push(reader.read_i32::<LE>()?);
     }
@@ -421,8 +450,8 @@ pub(super) fn read_room_order(reader: &mut impl Read) -> Result<Vec<i32>, Reader
 
 pub(super) fn read_asset_list<T: Asset>(reader: &mut impl Read, strict: bool) -> Result<AssetList<T>, ReaderError> {
     let collection_version = reader.read_u32::<LE>()?;
-    let count = reader.read_u32::<LE>()?;
-    let mut list = Vec::with_capacity(count as usize);
+    let count = checked_count(reader.read_u32::<LE>()?, "asset")?;
+    let mut list = Vec::with_capacity(count);
     for _ in 0..count {
         let mut item = item_reader(reader, collection_version >= 800)?;
         if !read_bool(&mut item)? {
@@ -454,8 +483,8 @@ pub(super) fn read_paths(reader: &mut impl Read, strict: bool) -> Result<AssetLi
 
 pub(super) fn read_sounds(reader: &mut impl Read, strict: bool) -> Result<AssetList<Sound>, ReaderError> {
     let collection_version = reader.read_u32::<LE>()?;
-    let count = reader.read_u32::<LE>()?;
-    let mut list = Vec::with_capacity(count as usize);
+    let count = checked_count(reader.read_u32::<LE>()?, "sound")?;
+    let mut list = Vec::with_capacity(count);
     for _ in 0..count {
         let mut item = item_reader(reader, collection_version >= 800)?;
         if !read_bool(&mut item)? {
@@ -489,8 +518,8 @@ pub(super) fn read_sounds(reader: &mut impl Read, strict: bool) -> Result<AssetL
 
 pub(super) fn read_sprites(reader: &mut impl Read, strict: bool) -> Result<AssetList<Sprite>, ReaderError> {
     let collection_version = reader.read_u32::<LE>()?;
-    let count = reader.read_u32::<LE>()?;
-    let mut list = Vec::with_capacity(count as usize);
+    let count = checked_count(reader.read_u32::<LE>()?, "sprite")?;
+    let mut list = Vec::with_capacity(count);
     for _ in 0..count {
         let mut item = item_reader(reader, collection_version >= 800)?;
         if !read_bool(&mut item)? {
@@ -515,8 +544,8 @@ pub(super) fn read_sprites(reader: &mut impl Read, strict: bool) -> Result<Asset
                 let origin_x = item.read_i32::<LE>()?;
                 let origin_y = item.read_i32::<LE>()?;
 
-                let frame_count = item.read_u32::<LE>()?;
-                let mut frames = Vec::with_capacity(frame_count as usize);
+                let frame_count = checked_count(item.read_u32::<LE>()?, "sprite frame")?;
+                let mut frames = Vec::with_capacity(frame_count);
                 for _ in 0..frame_count {
                     let _ver = item.read_u32::<LE>()?;
                     let _present = item.read_u32::<LE>()?;
@@ -572,9 +601,9 @@ pub(super) fn read_sprites(reader: &mut impl Read, strict: bool) -> Result<Asset
             800 | 810 => {
                 let origin_x = item.read_i32::<LE>()?;
                 let origin_y = item.read_i32::<LE>()?;
-                let frame_count = item.read_u32::<LE>()?;
+                let frame_count = checked_count(item.read_u32::<LE>()?, "sprite frame")?;
                 let (frames, colliders, per_frame_colliders) = if frame_count != 0 {
-                    let mut frames = Vec::with_capacity(frame_count as usize);
+                    let mut frames = Vec::with_capacity(frame_count);
                     for _ in 0..frame_count {
                         let _ver = item.read_u32::<LE>()?;
                         let width = item.read_u32::<LE>()?;
@@ -636,8 +665,8 @@ pub(super) fn read_sprites(reader: &mut impl Read, strict: bool) -> Result<Asset
 
 pub(super) fn read_backgrounds(reader: &mut impl Read, strict: bool) -> Result<AssetList<Background>, ReaderError> {
     let collection_version = reader.read_u32::<LE>()?;
-    let count = reader.read_u32::<LE>()?;
-    let mut list = Vec::with_capacity(count as usize);
+    let count = checked_count(reader.read_u32::<LE>()?, "background")?;
+    let mut list = Vec::with_capacity(count);
     for _ in 0..count {
         let mut item = item_reader(reader, collection_version >= 800)?;
         if !read_bool(&mut item)? {
@@ -686,8 +715,8 @@ pub(super) fn read_backgrounds(reader: &mut impl Read, strict: bool) -> Result<A
 
 pub(super) fn read_scripts(reader: &mut impl Read, strict: bool) -> Result<AssetList<Script>, ReaderError> {
     let collection_version = reader.read_u32::<LE>()?;
-    let count = reader.read_u32::<LE>()?;
-    let mut list = Vec::with_capacity(count as usize);
+    let count = checked_count(reader.read_u32::<LE>()?, "script")?;
+    let mut list = Vec::with_capacity(count);
     for _ in 0..count {
         let mut item = item_reader(reader, collection_version >= 800)?;
         if !read_bool(&mut item)? {
@@ -718,8 +747,8 @@ pub(super) fn read_scripts(reader: &mut impl Read, strict: bool) -> Result<Asset
 
 pub(super) fn read_fonts(reader: &mut impl Read, strict: bool) -> Result<AssetList<Font>, ReaderError> {
     let collection_version = reader.read_u32::<LE>()?;
-    let count = reader.read_u32::<LE>()?;
-    let mut list = Vec::with_capacity(count as usize);
+    let count = checked_count(reader.read_u32::<LE>()?, "font")?;
+    let mut list = Vec::with_capacity(count);
     for _ in 0..count {
         let mut item = item_reader(reader, collection_version >= 800)?;
         if !read_bool(&mut item)? {
@@ -780,8 +809,8 @@ pub(super) fn read_fonts(reader: &mut impl Read, strict: bool) -> Result<AssetLi
 /// name/blob loop (see [`read_gm600_includes`]).
 pub(super) fn read_includes(reader: &mut impl Read, strict: bool) -> Result<Vec<IncludedFile>, ReaderError> {
     let collection_version = reader.read_u32::<LE>()?;
-    let count = reader.read_u32::<LE>()?;
-    let mut list = Vec::with_capacity(count as usize);
+    let count = checked_count(reader.read_u32::<LE>()?, "included file")?;
+    let mut list = Vec::with_capacity(count);
     for _ in 0..count {
         let mut item = item_reader(reader, collection_version >= 800)?;
         let version = item.read_u32::<LE>()?;
@@ -838,23 +867,23 @@ pub(super) fn read_extensions(reader: &mut impl Read, strict: bool) -> Result<Ve
     if strict && version != 700 {
         return Err(ReaderError::AssetError(AssetError::VersionError { expected: 700, got: version }))
     }
-    let count = reader.read_u32::<LE>()?;
-    let mut extensions = Vec::with_capacity(count as usize);
+    let count = checked_count(reader.read_u32::<LE>()?, "extension")?;
+    let mut extensions = Vec::with_capacity(count);
     for _ in 0..count {
         let _ver = reader.read_u32::<LE>()?;
         let name = read_pas_string_raw(reader)?;
         let folder_name = read_pas_string_raw(reader)?;
 
-        let file_count = reader.read_u32::<LE>()?;
-        let mut files = Vec::with_capacity(file_count as usize);
+        let file_count = checked_count(reader.read_u32::<LE>()?, "extension file")?;
+        let mut files = Vec::with_capacity(file_count);
         for _ in 0..file_count {
             let _ver = reader.read_u32::<LE>()?;
             let name = read_pas_string_raw(reader)?;
             let kind = FileKind::from(reader.read_u32::<LE>()?);
             let initializer = read_pas_string_raw(reader)?;
             let finalizer = read_pas_string_raw(reader)?;
-            let function_count = reader.read_u32::<LE>()?;
-            let mut functions = Vec::with_capacity(function_count as usize);
+            let function_count = checked_count(reader.read_u32::<LE>()?, "extension function")?;
+            let mut functions = Vec::with_capacity(function_count);
             for _ in 0..function_count {
                 let _ver = reader.read_u32::<LE>()?;
                 let name = read_pas_string_raw(reader)?;
@@ -870,8 +899,8 @@ pub(super) fn read_extensions(reader: &mut impl Read, strict: bool) -> Result<Ve
                 functions.push(FileFunction { name, external_name, convention, id, arg_count, arg_types, return_type });
             }
 
-            let const_count = reader.read_u32::<LE>()?;
-            let mut consts = Vec::with_capacity(const_count as usize);
+            let const_count = checked_count(reader.read_u32::<LE>()?, "extension constant")?;
+            let mut consts = Vec::with_capacity(const_count);
             for _ in 0..const_count {
                 let _ver = reader.read_u32::<LE>()?;
                 let name = read_pas_string_raw(reader)?;
@@ -896,4 +925,50 @@ pub(super) fn read_extensions(reader: &mut impl Read, strict: bool) -> Result<Ve
         extensions.push(Extension { name, folder_name, files });
     }
     Ok(extensions)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{checked_count, read_compressed_with_limit, skip_blob, MAX_SAFE_COLLECTION_ITEMS};
+    use byteorder::{WriteBytesExt, LE};
+    use flate2::{write::ZlibEncoder, Compression};
+    use std::io::{Cursor, Write};
+
+    fn compressed_chunk(bytes: &[u8]) -> Vec<u8> {
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(bytes).unwrap();
+        let compressed = encoder.finish().unwrap();
+        let mut chunk = Vec::new();
+        chunk.write_u32::<LE>(compressed.len() as u32).unwrap();
+        chunk.extend_from_slice(&compressed);
+        chunk
+    }
+
+    #[test]
+    fn compressed_output_at_limit_is_accepted() {
+        let mut chunk = Cursor::new(compressed_chunk(&[0x5A; 64]));
+        assert_eq!(read_compressed_with_limit(&mut chunk, 64).unwrap(), vec![0x5A; 64]);
+    }
+
+    #[test]
+    fn compressed_output_over_limit_is_rejected() {
+        let mut chunk = Cursor::new(compressed_chunk(&[0x5A; 65]));
+        let error = read_compressed_with_limit(&mut chunk, 64).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn truncated_skipped_blob_is_rejected() {
+        let mut data = Vec::new();
+        data.write_u32::<LE>(4).unwrap();
+        data.extend_from_slice(&[1, 2]);
+        let error = skip_blob(&mut Cursor::new(data)).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn excessive_collection_count_is_rejected() {
+        let error = checked_count((MAX_SAFE_COLLECTION_ITEMS + 1) as u32, "test").unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
 }
