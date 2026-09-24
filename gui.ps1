@@ -2,7 +2,8 @@
 .SYNOPSIS
     OpenGMK Decompiler Studio GUI
     Drag-and-drop front-end for GameMaker executable decompilation with smart
-    heuristic version guessing, output health validation, and automated fallback cascading.
+    heuristic version guessing, output health validation, interactive resolution options,
+    non-blocking notification drawer, and automated fallback cascading.
 #>
 
 [CmdletBinding()]
@@ -396,14 +397,16 @@ function Invoke-DirectGm5Extraction {
 }
 
 # ---------------------------------------------------------------------------------------
-# Cascading Strategy Pipeline Execution
+# Cascading Strategy Pipeline Execution with Real-Time Streaming
 # ---------------------------------------------------------------------------------------
 function Invoke-DecompilationPipeline {
     param(
         [string]$ExePath,
         [hashtable]$Analysis,
         [scriptblock]$LogCallback,
-        [scriptblock]$StatusCallback
+        [scriptblock]$StatusCallback,
+        [string]$EngineOverride = "Auto",
+        [string]$ModeOverride = "Auto"
     )
 
     $decompilerBin = Get-DecompilerExe
@@ -413,109 +416,176 @@ function Invoke-DecompilationPipeline {
         return @{ Success = $false; Error = "gm8decompiler.exe not found" }
     }
 
+    # Apply Engine Override if selected
+    $effectiveAnalysis = @{}
+    foreach ($k in $Analysis.Keys) { $effectiveAnalysis[$k] = $Analysis[$k] }
+
+    switch ($EngineOverride) {
+        "GameMaker 7.0" {
+            $effectiveAnalysis.Version = "GameMaker 7.0"
+            $effectiveAnalysis.Short = "GM7"
+            $effectiveAnalysis.Strategy = "GM7"
+            $effectiveAnalysis.RecommendedExt = ".gmk"
+            & $LogCallback "[OVERRIDE] Forcing Engine Version: GameMaker 7.0"
+        }
+        "GameMaker 8.0" {
+            $effectiveAnalysis.Version = "GameMaker 8.0"
+            $effectiveAnalysis.Short = "GM80"
+            $effectiveAnalysis.Strategy = "GM80"
+            $effectiveAnalysis.RecommendedExt = ".gmk"
+            & $LogCallback "[OVERRIDE] Forcing Engine Version: GameMaker 8.0"
+        }
+        "GameMaker 8.1" {
+            $effectiveAnalysis.Version = "GameMaker 8.1"
+            $effectiveAnalysis.Short = "GM81"
+            $effectiveAnalysis.Strategy = "GM81"
+            $effectiveAnalysis.RecommendedExt = ".gm81"
+            & $LogCallback "[OVERRIDE] Forcing Engine Version: GameMaker 8.1"
+        }
+        "GameMaker 6.0 / 6.1" {
+            $effectiveAnalysis.Version = "GameMaker 6.0 / 6.1"
+            $effectiveAnalysis.Short = "GM6"
+            $effectiveAnalysis.Strategy = "GM6"
+            $effectiveAnalysis.RecommendedExt = ".gmk"
+            & $LogCallback "[OVERRIDE] Forcing Engine Version: GameMaker 6.0 / 6.1"
+        }
+        "GameMaker 5.0 / 5.3" {
+            $effectiveAnalysis.Version = "GameMaker 5.0 / 5.3"
+            $effectiveAnalysis.Short = "GM5"
+            $effectiveAnalysis.Strategy = "GM5"
+            $effectiveAnalysis.RecommendedExt = ".gmd"
+            & $LogCallback "[OVERRIDE] Forcing Engine Version: GameMaker 5.0 / 5.3"
+        }
+    }
+
     $inputInfo = Get-Item $ExePath
     $exeDir = $inputInfo.DirectoryName
     $exeBaseName = [System.IO.Path]::GetFileNameWithoutExtension($ExePath)
-    $primaryExt = $Analysis.RecommendedExt
+    $primaryExt = $effectiveAnalysis.RecommendedExt
     if (-not $primaryExt) { $primaryExt = ".gmk" }
 
     # Define prioritized fallback strategy sequence
     $strategies = [System.Collections.Generic.List[hashtable]]::new()
 
-    # Strategy 1: Recommended Primary Strategy
-    $strategies.Add(@{
-        Name = "Attempt 1 (Standard Primary: $primaryExt)"
-        Extension = $primaryExt
-        Flags = @()
-        Description = "Standard decompiler pass for $($Analysis.Version)"
-    })
-
-    # Strategy 2: Lazy Mode (-l)
-    $strategies.Add(@{
-        Name = "Attempt 2 (Lazy Mode: -l)"
-        Extension = $primaryExt
-        Flags = @("-l")
-        Description = "Bypasses asset data integrity assertions"
-    })
-
-    # Strategy 3: Preserve Custom Code (-p)
-    $strategies.Add(@{
-        Name = "Attempt 3 (Preserve Mode: -p)"
-        Extension = $primaryExt
-        Flags = @("-p")
-        Description = "Preserves unparsed code actions without failing"
-    })
-
-    # Strategy 4: Lazy + Preserve (-l -p)
-    $strategies.Add(@{
-        Name = "Attempt 4 (Lazy + Preserve: -l -p)"
-        Extension = $primaryExt
-        Flags = @("-l", "-p")
-        Description = "Combined fault-tolerant parsing"
-    })
-
-    # Strategy 5: Deobfuscator Off (-d off)
-    $strategies.Add(@{
-        Name = "Attempt 5 (Deobfuscator Disabled: -l -p -d off)"
-        Extension = $primaryExt
-        Flags = @("-l", "-p", "-d", "off")
-        Description = "Skips AST deobfuscation to avoid syntax transformer panics"
-    })
-
-    # Strategy 6: Alternative File Format Swaps
-    if ($primaryExt -eq ".gmd") {
+    if ($ModeOverride -eq "Standard Only") {
         $strategies.Add(@{
-            Name = "Attempt 6 (Format Swap: .gmk)"
-            Extension = ".gmk"
-            Flags = @("-l", "-p")
-            Description = "Try writing output as GMK format"
+            Name = "Attempt 1 (Standard Primary: $primaryExt)"
+            Extension = $primaryExt
+            Flags = @()
+            Description = "Standard decompiler pass for $($effectiveAnalysis.Version)"
         })
-    } elseif ($primaryExt -eq ".gm81") {
+    } elseif ($ModeOverride -eq "Lazy Mode (-l)") {
         $strategies.Add(@{
-            Name = "Attempt 6 (Format Swap: .gmk)"
-            Extension = ".gmk"
+            Name = "Manual Attempt (Lazy Mode: -l)"
+            Extension = $primaryExt
+            Flags = @("-l")
+            Description = "Bypasses asset data integrity assertions"
+        })
+    } elseif ($ModeOverride -eq "Preserve Mode (-p)") {
+        $strategies.Add(@{
+            Name = "Manual Attempt (Preserve Mode: -p)"
+            Extension = $primaryExt
+            Flags = @("-p")
+            Description = "Preserves unparsed code actions without failing"
+        })
+    } elseif ($ModeOverride -eq "Lazy + Preserve (-l -p)") {
+        $strategies.Add(@{
+            Name = "Manual Attempt (Lazy + Preserve: -l -p)"
+            Extension = $primaryExt
             Flags = @("-l", "-p")
-            Description = "Try writing output as GM8.0 GMK format"
+            Description = "Combined fault-tolerant parsing"
         })
     } else {
+        # Full Cascade (Default)
         $strategies.Add(@{
-            Name = "Attempt 6 (Format Swap: .gmd)"
-            Extension = ".gmd"
-            Flags = @("-l", "-p")
-            Description = "Try writing output as legacy GMD format"
+            Name = "Attempt 1 (Standard Primary: $primaryExt)"
+            Extension = $primaryExt
+            Flags = @()
+            Description = "Standard decompiler pass for $($effectiveAnalysis.Version)"
         })
-    }
 
-    # Strategy 7: Check for External Tools in tools/
-    $toolsDir = Join-Path $ScriptDir "tools"
-    if (Test-Path $toolsDir) {
-        $externalTools = Get-ChildItem -Path $toolsDir -Filter "*.exe" -File
-        foreach ($tool in $externalTools) {
+        $strategies.Add(@{
+            Name = "Attempt 2 (Lazy Mode: -l)"
+            Extension = $primaryExt
+            Flags = @("-l")
+            Description = "Bypasses asset data integrity assertions"
+        })
+
+        $strategies.Add(@{
+            Name = "Attempt 3 (Preserve Mode: -p)"
+            Extension = $primaryExt
+            Flags = @("-p")
+            Description = "Preserves unparsed code actions without failing"
+        })
+
+        $strategies.Add(@{
+            Name = "Attempt 4 (Lazy + Preserve: -l -p)"
+            Extension = $primaryExt
+            Flags = @("-l", "-p")
+            Description = "Combined fault-tolerant parsing"
+        })
+
+        $strategies.Add(@{
+            Name = "Attempt 5 (Deobfuscator Disabled: -l -p -d off)"
+            Extension = $primaryExt
+            Flags = @("-l", "-p", "-d", "off")
+            Description = "Skips AST deobfuscation to avoid syntax transformer panics"
+        })
+
+        if ($primaryExt -eq ".gmd") {
             $strategies.Add(@{
-                Name = "External Tool: $($tool.Name)"
-                ExternalExe = $tool.FullName
-                Flags = @()
-                Description = "External helper tool in tools/"
+                Name = "Attempt 6 (Format Swap: .gmk)"
+                Extension = ".gmk"
+                Flags = @("-l", "-p")
+                Description = "Try writing output as GMK format"
+            })
+        } elseif ($primaryExt -eq ".gm81") {
+            $strategies.Add(@{
+                Name = "Attempt 6 (Format Swap: .gmk)"
+                Extension = ".gmk"
+                Flags = @("-l", "-p")
+                Description = "Try writing output as GM8.0 GMK format"
+            })
+        } else {
+            $strategies.Add(@{
+                Name = "Attempt 6 (Format Swap: .gmd)"
+                Extension = ".gmd"
+                Flags = @("-l", "-p")
+                Description = "Try writing output as legacy GMD format"
             })
         }
-    }
 
-    # Strategy 8: Direct payload extractor if GM5
-    if ($Analysis.Short -eq "GM5" -and $Analysis.SwapSeed) {
-        $strategies.Add(@{
-            Name = "Direct GMD Stream Decryptor"
-            IsDirectGm5 = $true
-            Extension = ".gmd"
-            Description = "Pure cipher payload extraction directly from executable stream"
-        })
+        # Check for External Tools in tools/
+        $toolsDir = Join-Path $ScriptDir "tools"
+        if (Test-Path $toolsDir) {
+            $externalTools = Get-ChildItem -Path $toolsDir -Filter "*.exe" -File
+            foreach ($tool in $externalTools) {
+                $strategies.Add(@{
+                    Name = "External Tool: $($tool.Name)"
+                    ExternalExe = $tool.FullName
+                    Flags = @()
+                    Description = "External helper tool in tools/"
+                })
+            }
+        }
+
+        # Direct payload extractor if GM5
+        if ($effectiveAnalysis.Short -eq "GM5" -and $effectiveAnalysis.SwapSeed) {
+            $strategies.Add(@{
+                Name = "Direct GMD Stream Decryptor"
+                IsDirectGm5 = $true
+                Extension = ".gmd"
+                Description = "Pure cipher payload extraction directly from executable stream"
+            })
+        }
     }
 
     & $LogCallback "========================================================"
     & $LogCallback "Target Executable: $($inputInfo.FullName)"
     & $LogCallback "File Size: $([Math]::Round($inputInfo.Length / 1MB, 2)) MB ($($inputInfo.Length) bytes)"
-    & $LogCallback "Detected Engine: $($Analysis.Version) (Confidence: $($Analysis.Confidence))"
-    & $LogCallback "Technical Details: $($Analysis.Details)"
-    & $LogCallback "Cascading Fallback Pipeline: $($strategies.Count) strategies queued"
+    & $LogCallback "Active Engine Profile: $($effectiveAnalysis.Version) (Confidence: $($effectiveAnalysis.Confidence))"
+    & $LogCallback "Technical Details: $($effectiveAnalysis.Details)"
+    & $LogCallback "Execution Queue: $($strategies.Count) strategies configured"
     & $LogCallback "========================================================"
 
     $attemptIndex = 0
@@ -539,7 +609,7 @@ function Invoke-DecompilationPipeline {
 
         if ($strat.IsDirectGm5) {
             & $LogCallback "    Executing direct cipher extraction..."
-            $directSuccess = Invoke-DirectGm5Extraction -ExePath $ExePath -OutputPath $targetOut -PayloadOffset $Analysis.PayloadOffset -SwapSeed $Analysis.SwapSeed
+            $directSuccess = Invoke-DirectGm5Extraction -ExePath $ExePath -OutputPath $targetOut -PayloadOffset $effectiveAnalysis.PayloadOffset -SwapSeed $effectiveAnalysis.SwapSeed
             $stopwatch.Stop()
             if (-not $directSuccess) { $exitCode = 1 }
         } elseif ($strat.ExternalExe) {
@@ -552,15 +622,27 @@ function Invoke-DecompilationPipeline {
             $psi.RedirectStandardError = $true
             $psi.CreateNoWindow = $true
 
-            $proc = [System.Diagnostics.Process]::Start($psi)
-            while (-not $proc.HasExited) {
-                $line = $proc.StandardOutput.ReadLine()
-                if ($line) { & $LogCallback "    [tool] $line" }
-            }
+            $proc = New-Object System.Diagnostics.Process
+            $proc.StartInfo = $psi
+            $proc.EnableRaisingEvents = $true
+
+            $proc.add_OutputDataReceived({
+                param($s, $e)
+                if ($e.Data) { & $LogCallback "    [tool] $($e.Data)" }
+            })
+            $proc.add_ErrorDataReceived({
+                param($s, $e)
+                if ($e.Data) { & $LogCallback "    [tool err] $($e.Data)" }
+            })
+
+            $proc.Start() | Out-Null
+            $proc.BeginOutputReadLine()
+            $proc.BeginErrorReadLine()
+            $proc.WaitForExit()
             $exitCode = $proc.ExitCode
             $stopwatch.Stop()
         } else {
-            # Run gm8decompiler with non-interactive flags
+            # Run gm8decompiler with non-interactive flags and asynchronous real-time streaming
             $argList = @("-y", "-o", "`"$targetOut`"")
             if ($strat.Flags) { $argList += $strat.Flags }
             $argList += "`"$ExePath`""
@@ -578,24 +660,26 @@ function Invoke-DecompilationPipeline {
             $psi.EnvironmentVariables["MSYSTEM"] = "1"
             $psi.CreateNoWindow = $true
 
-            $proc = [System.Diagnostics.Process]::Start($psi)
+            $proc = New-Object System.Diagnostics.Process
+            $proc.StartInfo = $psi
+            $proc.EnableRaisingEvents = $true
+
+            $proc.add_OutputDataReceived({
+                param($s, $e)
+                if ($e.Data) { & $LogCallback "    [stdout] $($e.Data)" }
+            })
+            $proc.add_ErrorDataReceived({
+                param($s, $e)
+                if ($e.Data) { & $LogCallback "    [stderr] $($e.Data)" }
+            })
+
+            $proc.Start() | Out-Null
             $proc.StandardInput.Close()
-            $stdOut = $proc.StandardOutput.ReadToEnd()
-            $stdErr = $proc.StandardError.ReadToEnd()
+            $proc.BeginOutputReadLine()
+            $proc.BeginErrorReadLine()
             $proc.WaitForExit()
             $exitCode = $proc.ExitCode
             $stopwatch.Stop()
-
-            if ($stdOut) {
-                foreach ($l in ($stdOut -split "`r?`n")) {
-                    if ($l.Trim()) { & $LogCallback "    [stdout] $l" }
-                }
-            }
-            if ($stdErr) {
-                foreach ($l in ($stdErr -split "`r?`n")) {
-                    if ($l.Trim()) { & $LogCallback "    [stderr] $l" }
-                }
-            }
         }
 
         # Check Output Health
@@ -668,13 +752,13 @@ if ($NonInteractiveTest) {
 }
 
 # ---------------------------------------------------------------------------------------
-# WPF GUI Definition & Event Wiring
+# WPF GUI Definition with Non-Blocking Notification Drawer & XML Entity Typography
 # ---------------------------------------------------------------------------------------
 
 [xml]$xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="OpenGMK Decompiler Studio" Height="780" Width="840" MinHeight="620" MinWidth="700"
+        Title="OpenGMK Decompiler Studio" Height="820" Width="880" MinHeight="660" MinWidth="740"
         WindowStartupLocation="CenterScreen" Background="#181825"
         Foreground="#CDD6F4" FontFamily="Segoe UI" AllowDrop="True">
     <Window.Resources>
@@ -712,92 +796,168 @@ if ($NonInteractiveTest) {
                 </Setter.Value>
             </Setter>
         </Style>
+
+        <Style TargetType="ComboBox">
+            <Setter Property="Background" Value="#313244"/>
+            <Setter Property="Foreground" Value="#CDD6F4"/>
+            <Setter Property="BorderBrush" Value="#45475A"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Padding" Value="6,2"/>
+        </Style>
     </Window.Resources>
 
     <Grid Margin="20">
         <Grid.RowDefinitions>
-            <RowDefinition Height="Auto"/>   <!-- Header -->
-            <RowDefinition Height="140"/>    <!-- Drop Zone -->
-            <RowDefinition Height="Auto"/>   <!-- Binary Analysis Card -->
-            <RowDefinition Height="*"/>      <!-- Activity Console -->
-            <RowDefinition Height="Auto"/>   <!-- Bottom Actions -->
+            <RowDefinition Height="Auto"/>   <!-- 0: Header -->
+            <RowDefinition Height="125"/>    <!-- 1: Drop Zone -->
+            <RowDefinition Height="Auto"/>   <!-- 2: Binary Analysis Card -->
+            <RowDefinition Height="Auto"/>   <!-- 3: Non-blocking Notification Drawer -->
+            <RowDefinition Height="*"/>      <!-- 4: Activity Console -->
+            <RowDefinition Height="Auto"/>   <!-- 5: Bottom Actions -->
         </Grid.RowDefinitions>
 
         <!-- Header -->
-        <Grid Grid.Row="0" Margin="0,0,0,16">
+        <Grid Grid.Row="0" Margin="0,0,0,14">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*"/>
                 <ColumnDefinition Width="Auto"/>
             </Grid.ColumnDefinitions>
             <StackPanel Orientation="Vertical">
                 <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                    <TextBlock Text="⚡ OpenGMK" FontSize="24" FontWeight="Bold" Foreground="#89B4FA"/>
+                    <TextBlock Text="&#x26A1; OpenGMK" FontSize="24" FontWeight="Bold" Foreground="#89B4FA"/>
                     <TextBlock Text=" Decompiler Studio" FontSize="24" FontWeight="Bold" Foreground="#F5E0DC"/>
                     <Border Background="#A6E3A1" CornerRadius="4" Margin="12,0,0,0" Padding="6,2" VerticalAlignment="Center">
-                        <TextBlock Text="v0.2.0" FontSize="11" FontWeight="Bold" Foreground="#11111B"/>
+                        <TextBlock Text="v0.2.1" FontSize="11" FontWeight="Bold" Foreground="#11111B"/>
                     </Border>
                 </StackPanel>
-                <TextBlock Text="Smart Version Detection • Health Checking • Cascading Fallback Engine"
+                <TextBlock Text="Smart Version Detection &#x2022; Health Checking &#x2022; Cascading Fallback Engine"
                            FontSize="12" Foreground="#A6ADC8" Margin="2,4,0,0"/>
             </StackPanel>
-            <Button x:Name="BtnBrowse" Grid.Column="1" Content="📁 Select .EXE..." VerticalAlignment="Center" Height="36"/>
+            <Button x:Name="BtnBrowse" Grid.Column="1" Content="&#x1F4C1; Select .EXE..." VerticalAlignment="Center" Height="36"/>
         </Grid>
 
         <!-- Drag & Drop Zone -->
         <Border x:Name="DropZone" Grid.Row="1" Background="#1E1E2E" BorderBrush="#45475A"
-                BorderThickness="2" CornerRadius="10" Margin="0,0,0,14" Cursor="Hand" AllowDrop="True">
-            <Border.Style>
-                <Style TargetType="Border">
-                    <Setter Property="BorderBrush" Value="#45475A"/>
-                </Style>
-            </Border.Style>
+                BorderThickness="2" CornerRadius="10" Margin="0,0,0,12" Cursor="Hand" AllowDrop="True">
             <Grid>
                 <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">
-                    <TextBlock x:Name="DropIcon" Text="⬇" FontSize="36" HorizontalAlignment="Center" Foreground="#89B4FA"/>
+                    <TextBlock x:Name="DropIcon" Text="&#x2B07;" FontSize="32" HorizontalAlignment="Center" Foreground="#89B4FA"/>
                     <TextBlock x:Name="DropTextMain" Text="Drag &amp; Drop GameMaker Executable (.exe) Here"
-                               FontSize="16" FontWeight="SemiBold" HorizontalAlignment="Center" Foreground="#CDD6F4" Margin="0,4,0,0"/>
-                    <TextBlock x:Name="DropTextSub" Text="Automatic version guessing and cascading fallback decompilation"
-                               FontSize="12" Foreground="#6C7086" HorizontalAlignment="Center" Margin="0,2,0,0"/>
+                               FontSize="15" FontWeight="SemiBold" HorizontalAlignment="Center" Foreground="#CDD6F4" Margin="0,3,0,0"/>
+                    <TextBlock x:Name="DropTextSub" Text="Automatic version detection, cascading fallbacks and non-blocking diagnostics"
+                               FontSize="11" Foreground="#6C7086" HorizontalAlignment="Center" Margin="0,2,0,0"/>
                 </StackPanel>
             </Grid>
         </Border>
 
         <!-- Binary Analysis Card (Initially collapsed) -->
         <Border x:Name="AnalysisCard" Grid.Row="2" Background="#1E1E2E" BorderBrush="#313244"
-                BorderThickness="1" CornerRadius="8" Margin="0,0,0,14" Padding="14" Visibility="Collapsed">
+                BorderThickness="1" CornerRadius="8" Margin="0,0,0,12" Padding="14" Visibility="Collapsed">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+
+                <Grid Grid.Row="0">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <StackPanel Orientation="Vertical">
+                        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                            <TextBlock Text="TARGET: " FontSize="11" FontWeight="Bold" Foreground="#6C7086"/>
+                            <TextBlock x:Name="TxtFileName" Text="game.exe" FontSize="13" FontWeight="Bold" Foreground="#F5E0DC"/>
+                            <TextBlock x:Name="TxtFileSize" Text=" (7.2 MB)" FontSize="12" Foreground="#A6ADC8"/>
+                        </StackPanel>
+                        <StackPanel Orientation="Horizontal" Margin="0,6,0,0" VerticalAlignment="Center">
+                            <TextBlock Text="DETECTED: " FontSize="11" FontWeight="Bold" Foreground="#6C7086" VerticalAlignment="Center"/>
+                            <Border x:Name="BadgeVersion" Background="#A6E3A1" CornerRadius="4" Padding="6,2" Margin="4,0,8,0">
+                                <TextBlock x:Name="TxtBadgeVersion" Text="GameMaker 7.0" FontSize="11" FontWeight="Bold" Foreground="#11111B"/>
+                            </Border>
+                            <TextBlock x:Name="TxtConfidence" Text="Confidence: 98%" FontSize="11" Foreground="#89B4FA" VerticalAlignment="Center"/>
+                        </StackPanel>
+                        <TextBlock x:Name="TxtDetails" Text="Payload offset: 1980000 | Magic: 1234321" FontSize="11"
+                                   Foreground="#BAC2DE" Margin="0,6,0,0" TextWrapping="Wrap"/>
+                    </StackPanel>
+
+                    <!-- Pipeline Status Badge -->
+                    <StackPanel Grid.Column="1" HorizontalAlignment="Right" VerticalAlignment="Center">
+                        <Border x:Name="BadgeStatus" Background="#313244" CornerRadius="6" Padding="10,6">
+                            <TextBlock x:Name="TxtStatus" Text="READY" FontSize="12" FontWeight="Bold" Foreground="#89B4FA"/>
+                        </Border>
+                    </StackPanel>
+                </Grid>
+
+                <!-- Interactive Resolution Controls -->
+                <Border Grid.Row="1" Margin="0,10,0,0" Padding="0,10,0,0" BorderBrush="#25273A" BorderThickness="0,1,0,0">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                            <TextBlock Text="ENGINE OVERRIDE: " FontSize="11" FontWeight="Bold" Foreground="#6C7086" VerticalAlignment="Center"/>
+                            <ComboBox x:Name="CmbEngineOverride" Width="185" Height="26" Margin="4,0,12,0" FontSize="11">
+                                <ComboBoxItem Content="Auto-Detect (Heuristic)" IsSelected="True"/>
+                                <ComboBoxItem Content="GameMaker 7.0"/>
+                                <ComboBoxItem Content="GameMaker 8.0"/>
+                                <ComboBoxItem Content="GameMaker 8.1"/>
+                                <ComboBoxItem Content="GameMaker 6.0 / 6.1"/>
+                                <ComboBoxItem Content="GameMaker 5.0 / 5.3"/>
+                            </ComboBox>
+
+                            <TextBlock Text="MODE: " FontSize="11" FontWeight="Bold" Foreground="#6C7086" VerticalAlignment="Center"/>
+                            <ComboBox x:Name="CmbExtractionMode" Width="150" Height="26" Margin="4,0,8,0" FontSize="11">
+                                <ComboBoxItem Content="Cascading (Auto)" IsSelected="True"/>
+                                <ComboBoxItem Content="Standard Only"/>
+                                <ComboBoxItem Content="Lazy Mode (-l)"/>
+                                <ComboBoxItem Content="Preserve Mode (-p)"/>
+                                <ComboBoxItem Content="Lazy + Preserve (-l -p)"/>
+                            </ComboBox>
+                        </StackPanel>
+
+                        <Button x:Name="BtnReRun" Grid.Column="1" Content="&#x25B6; Decompile" Height="28" Padding="14,3"
+                                Background="#89B4FA" Foreground="#11111B" FontWeight="Bold"/>
+                    </Grid>
+                </Border>
+            </Grid>
+        </Border>
+
+        <!-- Non-Blocking Notification Drawer / Toast Banner (Zero modal popups) -->
+        <Border x:Name="NotificationDrawer" Grid.Row="3" Background="#182A24" BorderBrush="#A6E3A1"
+                BorderThickness="1" CornerRadius="8" Margin="0,0,0,12" Padding="14,10" Visibility="Collapsed">
             <Grid>
                 <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
                     <ColumnDefinition Width="*"/>
                     <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
-                <StackPanel Orientation="Vertical">
-                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                        <TextBlock Text="TARGET: " FontSize="11" FontWeight="Bold" Foreground="#6C7086"/>
-                        <TextBlock x:Name="TxtFileName" Text="game.exe" FontSize="13" FontWeight="Bold" Foreground="#F5E0DC"/>
-                        <TextBlock x:Name="TxtFileSize" Text=" (7.2 MB)" FontSize="12" Foreground="#A6ADC8"/>
-                    </StackPanel>
-                    <StackPanel Orientation="Horizontal" Margin="0,6,0,0" VerticalAlignment="Center">
-                        <TextBlock Text="DETECTED: " FontSize="11" FontWeight="Bold" Foreground="#6C7086" VerticalAlignment="Center"/>
-                        <Border x:Name="BadgeVersion" Background="#A6E3A1" CornerRadius="4" Padding="6,2" Margin="4,0,8,0">
-                            <TextBlock x:Name="TxtBadgeVersion" Text="GameMaker 5.0" FontSize="11" FontWeight="Bold" Foreground="#11111B"/>
-                        </Border>
-                        <TextBlock x:Name="TxtConfidence" Text="Confidence: 100%" FontSize="11" Foreground="#89B4FA" VerticalAlignment="Center"/>
-                    </StackPanel>
-                    <TextBlock x:Name="TxtDetails" Text="Payload offset: 1250000 | Magic: 1230500" FontSize="11"
-                               Foreground="#BAC2DE" Margin="0,6,0,0" TextWrapping="Wrap"/>
+
+                <TextBlock x:Name="TxtDrawerIcon" Grid.Column="0" Text="&#x2139;" FontSize="20" FontWeight="Bold"
+                           VerticalAlignment="Center" Margin="0,0,12,0" Foreground="#89B4FA"/>
+
+                <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="0,0,12,0">
+                    <TextBlock x:Name="TxtDrawerTitle" Text="Notification" FontSize="13" FontWeight="Bold" Foreground="#CDD6F4"/>
+                    <TextBlock x:Name="TxtDrawerMessage" Text="Details and actionable guidance..." FontSize="11" Foreground="#BAC2DE" TextWrapping="Wrap" Margin="0,2,0,0"/>
                 </StackPanel>
 
-                <!-- Pipeline Status Badge -->
-                <StackPanel Grid.Column="1" HorizontalAlignment="Right" VerticalAlignment="Center">
-                    <Border x:Name="BadgeStatus" Background="#313244" CornerRadius="6" Padding="10,6">
-                        <TextBlock x:Name="TxtStatus" Text="READY" FontSize="12" FontWeight="Bold" Foreground="#89B4FA"/>
-                    </Border>
+                <!-- Actionable Buttons inside Drawer -->
+                <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,8,0">
+                    <Button x:Name="BtnDrawerAction1" Content="Action 1" Height="28" Padding="10,2" Margin="0,0,6,0" Visibility="Collapsed"/>
+                    <Button x:Name="BtnDrawerAction2" Content="Action 2" Height="28" Padding="10,2" Margin="0,0,6,0" Visibility="Collapsed"/>
+                    <Button x:Name="BtnDrawerCopyLog" Content="Copy Diagnostic" Height="28" Padding="10,2" Margin="0,0,6,0" Visibility="Collapsed"/>
                 </StackPanel>
+
+                <!-- Dismiss Button -->
+                <Button x:Name="BtnDrawerDismiss" Grid.Column="3" Content="&#x2715;" Height="26" Width="26" Padding="0"
+                        VerticalAlignment="Center" Background="Transparent" BorderThickness="0" Foreground="#A6ADC8" Cursor="Hand"/>
             </Grid>
         </Border>
 
         <!-- Activity Console -->
-        <Grid Grid.Row="3" Margin="0,0,0,14">
+        <Grid Grid.Row="4" Margin="0,0,0,14">
             <Grid.RowDefinitions>
                 <RowDefinition Height="Auto"/>
                 <RowDefinition Height="*"/>
@@ -814,7 +974,7 @@ if ($NonInteractiveTest) {
         </Grid>
 
         <!-- Bottom Action Bar -->
-        <Grid Grid.Row="4">
+        <Grid Grid.Row="5">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*"/>
                 <ColumnDefinition Width="Auto"/>
@@ -825,10 +985,10 @@ if ($NonInteractiveTest) {
             </StackPanel>
 
             <StackPanel Grid.Column="1" Orientation="Horizontal">
-                <Button x:Name="BtnCopyLog" Content="📋 Copy Log" Margin="0,0,8,0"/>
-                <Button x:Name="BtnOpenFolder" Content="📂 Open Output Folder" IsEnabled="False" Margin="0,0,8,0"
+                <Button x:Name="BtnCopyLog" Content="&#x1F4CB; Copy Log" Margin="0,0,8,0"/>
+                <Button x:Name="BtnOpenFolder" Content="&#x1F4C2; Open Output Folder" IsEnabled="False" Margin="0,0,8,0"
                         Background="#89B4FA" Foreground="#11111B"/>
-                <Button x:Name="BtnOpenFile" Content="🚀 Open Project" IsEnabled="False"
+                <Button x:Name="BtnOpenFile" Content="&#x1F680; Open Project" IsEnabled="False"
                         Background="#A6E3A1" Foreground="#11111B"/>
             </StackPanel>
         </Grid>
@@ -853,6 +1013,17 @@ $txtConfidence = $window.FindName("TxtConfidence")
 $txtDetails = $window.FindName("TxtDetails")
 $badgeStatus = $window.FindName("BadgeStatus")
 $txtStatus = $window.FindName("TxtStatus")
+$cmbEngineOverride = $window.FindName("CmbEngineOverride")
+$cmbExtractionMode = $window.FindName("CmbExtractionMode")
+$btnReRun = $window.FindName("BtnReRun")
+$notificationDrawer = $window.FindName("NotificationDrawer")
+$txtDrawerIcon = $window.FindName("TxtDrawerIcon")
+$txtDrawerTitle = $window.FindName("TxtDrawerTitle")
+$txtDrawerMessage = $window.FindName("TxtDrawerMessage")
+$btnDrawerAction1 = $window.FindName("BtnDrawerAction1")
+$btnDrawerAction2 = $window.FindName("BtnDrawerAction2")
+$btnDrawerCopyLog = $window.FindName("BtnDrawerCopyLog")
+$btnDrawerDismiss = $window.FindName("BtnDrawerDismiss")
 $txtStrategyCount = $window.FindName("TxtStrategyCount")
 $txtConsole = $window.FindName("TxtConsole")
 $txtFooter = $window.FindName("TxtFooter")
@@ -861,7 +1032,11 @@ $btnOpenFolder = $window.FindName("BtnOpenFolder")
 $btnOpenFile = $window.FindName("BtnOpenFile")
 
 $activeOutputFile = $null
+$currentLoadedFile = $null
+$cachedAnalysis = $null
 $isProcessing = $false
+$drawerAction1Handler = $null
+$drawerAction2Handler = $null
 
 # Helper for thread-safe UI updates
 function Append-LogLine {
@@ -886,24 +1061,144 @@ function Update-PipelineStatus {
     })
 }
 
+# Non-blocking notification drawer (Zero modal popups)
+function Show-NotificationDrawer {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet("Success", "Error", "Warning", "Info")]
+        [string]$Type,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Title,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Message,
+
+        [string]$Action1Text = $null,
+        [scriptblock]$Action1Script = $null,
+
+        [string]$Action2Text = $null,
+        [scriptblock]$Action2Script = $null,
+
+        [switch]$ShowCopyLog
+    )
+
+    $window.Dispatcher.Invoke([Action]{
+        $notificationDrawer.Visibility = [System.Windows.Visibility]::Visible
+
+        switch ($Type) {
+            "Success" {
+                $notificationDrawer.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString("#182A24")
+                $notificationDrawer.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString("#A6E3A1")
+                $txtDrawerIcon.Text = [char]0x2714 # Checkmark
+                $txtDrawerIcon.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString("#A6E3A1")
+                $txtDrawerTitle.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString("#A6E3A1")
+            }
+            "Error" {
+                $notificationDrawer.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString("#2E1820")
+                $notificationDrawer.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString("#F38BA8")
+                $txtDrawerIcon.Text = [char]0x2716 # Cross
+                $txtDrawerIcon.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString("#F38BA8")
+                $txtDrawerTitle.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString("#F38BA8")
+            }
+            "Warning" {
+                $notificationDrawer.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString("#2E2418")
+                $notificationDrawer.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString("#FAB387")
+                $txtDrawerIcon.Text = [char]0x26A0 # Warning triangle
+                $txtDrawerIcon.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString("#FAB387")
+                $txtDrawerTitle.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString("#FAB387")
+            }
+            "Info" {
+                $notificationDrawer.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString("#182234")
+                $notificationDrawer.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString("#89B4FA")
+                $txtDrawerIcon.Text = [char]0x2139 # Info
+                $txtDrawerIcon.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString("#89B4FA")
+                $txtDrawerTitle.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString("#89B4FA")
+            }
+        }
+
+        $txtDrawerTitle.Text = $Title
+        $txtDrawerMessage.Text = $Message
+
+        # Action 1
+        if ($Action1Text -and $Action1Script) {
+            $btnDrawerAction1.Content = $Action1Text
+            $btnDrawerAction1.Visibility = [System.Windows.Visibility]::Visible
+            $script:drawerAction1Handler = $Action1Script
+        } else {
+            $btnDrawerAction1.Visibility = [System.Windows.Visibility]::Collapsed
+        }
+
+        # Action 2
+        if ($Action2Text -and $Action2Script) {
+            $btnDrawerAction2.Content = $Action2Text
+            $btnDrawerAction2.Visibility = [System.Windows.Visibility]::Visible
+            $script:drawerAction2Handler = $Action2Script
+        } else {
+            $btnDrawerAction2.Visibility = [System.Windows.Visibility]::Collapsed
+        }
+
+        # Copy Log Button
+        if ($ShowCopyLog) {
+            $btnDrawerCopyLog.Visibility = [System.Windows.Visibility]::Visible
+        } else {
+            $btnDrawerCopyLog.Visibility = [System.Windows.Visibility]::Collapsed
+        }
+    })
+}
+
+function Hide-NotificationDrawer {
+    $window.Dispatcher.Invoke([Action]{
+        $notificationDrawer.Visibility = [System.Windows.Visibility]::Collapsed
+    })
+}
+
+# Drawer Event Handlers
+$btnDrawerDismiss.Add_Click({
+    Hide-NotificationDrawer
+})
+
+$btnDrawerAction1.Add_Click({
+    if ($script:drawerAction1Handler) {
+        & $script:drawerAction1Handler
+    }
+})
+
+$btnDrawerAction2.Add_Click({
+    if ($script:drawerAction2Handler) {
+        & $script:drawerAction2Handler
+    }
+})
+
+$btnDrawerCopyLog.Add_Click({
+    try {
+        [System.Windows.Clipboard]::SetText($txtConsole.Text)
+        $txtFooter.Text = "Diagnostic log copied to clipboard."
+    } catch {}
+})
+
 # Main Execution Trigger
 function Start-ProcessFile {
     param([string]$FilePath)
 
-    if ($isProcessing) {
+    if ($script:isProcessing) {
         Append-LogLine "[WARN] Pipeline is currently busy processing another file."
         return
     }
 
     if (-not (Test-Path $FilePath)) {
         Append-LogLine "[ERROR] Selected path does not exist: $FilePath"
+        Show-NotificationDrawer -Type "Error" -Title "File Not Found" -Message "Path does not exist: $FilePath"
         return
     }
 
+    $script:currentLoadedFile = $FilePath
     $script:isProcessing = $true
     $script:activeOutputFile = $null
     $btnOpenFolder.IsEnabled = $false
     $btnOpenFile.IsEnabled = $false
+    $btnReRun.IsEnabled = $false
+    Hide-NotificationDrawer
     $txtConsole.Clear()
 
     $fileInfo = Get-Item $FilePath
@@ -911,8 +1206,9 @@ function Start-ProcessFile {
     $txtFileSize.Text = " ($([Math]::Round($fileInfo.Length / 1MB, 2)) MB)"
     $analysisCard.Visibility = [System.Windows.Visibility]::Visible
 
-    # Run quick binary inspection on UI thread
+    # Run binary inspection
     $analysis = Analyze-GameMakerBinary $FilePath
+    $script:cachedAnalysis = $analysis
     $txtBadgeVersion.Text = $analysis.Version
     $txtConfidence.Text = "Confidence: $($analysis.Confidence)"
     $txtDetails.Text = $analysis.Details
@@ -928,8 +1224,19 @@ function Start-ProcessFile {
     }
     $badgeVersion.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($badgeBg)
 
-    Update-PipelineStatus "STARTING..." "#313244" "#89B4FA"
-    $txtFooter.Text = "Analyzing $($fileInfo.Name)..."
+    Update-PipelineStatus "ANALYZING..." "#313244" "#89B4FA"
+    $txtFooter.Text = "Decompiling $($fileInfo.Name)..."
+
+    # Extract user interactive overrides from ComboBoxes
+    $engineOverrideText = $cmbEngineOverride.Text
+    $modeOverrideText = $cmbExtractionMode.Text
+
+    # Warn if GameMaker Studio file detected
+    if ($analysis.Short -eq "GMS") {
+        Show-NotificationDrawer -Type "Warning" -Title "GameMaker Studio Executable Detected" `
+            -Message "This file contains an IFF FORM chunk (data.win container). Legacy GMK decompilers cannot reconstruct Studio bytecode. UndertaleModTool (UTMT) is recommended for Studio titles." `
+            -ShowCopyLog
+    }
 
     # Run cascading decompiler pipeline on background thread
     [System.Threading.Tasks.Task]::Run([Action]{
@@ -937,7 +1244,9 @@ function Start-ProcessFile {
             $logBlock = { param($msg) Append-LogLine $msg }
             $statusBlock = { param($msg) Update-PipelineStatus $msg }
 
-            $result = Invoke-DecompilationPipeline -ExePath $FilePath -Analysis $analysis -LogCallback $logBlock -StatusCallback $statusBlock
+            $result = Invoke-DecompilationPipeline -ExePath $FilePath -Analysis $analysis `
+                -LogCallback $logBlock -StatusCallback $statusBlock `
+                -EngineOverride $engineOverrideText -ModeOverride $modeOverrideText
 
             $window.Dispatcher.Invoke([Action]{
                 if ($result.Success) {
@@ -946,11 +1255,33 @@ function Start-ProcessFile {
                     $txtFooter.Text = "Decompiled successfully to: $($result.OutputFile)"
                     $btnOpenFolder.IsEnabled = $true
                     $btnOpenFile.IsEnabled = $true
+
+                    Show-NotificationDrawer -Type "Success" -Title "Decompilation Completed" `
+                        -Message "Extracted via $($result.Strategy) ($([Math]::Round($result.OutputSize / 1MB, 2)) MB in $($result.ElapsedMs) ms)." `
+                        -Action1Text "Open Output Folder" -Action1Script {
+                            if ($script:activeOutputFile) { Start-Process "explorer.exe" -ArgumentList "/select,`"$($script:activeOutputFile)`"" }
+                        } `
+                        -Action2Text "Open Project" -Action2Script {
+                            if ($script:activeOutputFile) { Start-Process "$($script:activeOutputFile)" }
+                        }
                 } else {
                     Update-PipelineStatus "FAILED" "#F38BA8" "#11111B"
                     $txtFooter.Text = "Decompilation failed across all fallback strategies."
+
+                    Show-NotificationDrawer -Type "Error" -Title "Decompilation Incomplete" `
+                        -Message "All fallback strategies exhausted. You can retry with Lazy mode (-l) to bypass asset checks, or force a different engine version above." `
+                        -Action1Text "Try Lazy Mode (-l)" -Action1Script {
+                            $cmbExtractionMode.SelectedIndex = 2
+                            Start-ProcessFile -FilePath $script:currentLoadedFile
+                        } `
+                        -Action2Text "Force GM8 Mode" -Action2Script {
+                            $cmbEngineOverride.SelectedIndex = 2
+                            Start-ProcessFile -FilePath $script:currentLoadedFile
+                        } `
+                        -ShowCopyLog
                 }
                 $script:isProcessing = $false
+                $btnReRun.IsEnabled = $true
             })
         } catch {
             $err = $_
@@ -958,10 +1289,21 @@ function Start-ProcessFile {
                 Append-LogLine "[FATAL ERROR] $err"
                 Update-PipelineStatus "ERROR" "#F38BA8" "#11111B"
                 $script:isProcessing = $false
+                $btnReRun.IsEnabled = $true
+                Show-NotificationDrawer -Type "Error" -Title "Execution Error" `
+                    -Message "An unhandled exception occurred in the decompiler pipeline: $err" `
+                    -ShowCopyLog
             })
         }
     })
 }
+
+# Re-run Button in Analysis Card
+$btnReRun.Add_Click({
+    if ($script:currentLoadedFile) {
+        Start-ProcessFile $script:currentLoadedFile
+    }
+})
 
 # ---------------------------------------------------------------------------------------
 # Drag & Drop Event Handlers
@@ -1052,16 +1394,15 @@ $btnCopyLog.Add_Click({
 
 # Open Output Folder Button
 $btnOpenFolder.Add_Click({
-    if ($activeOutputFile -and (Test-Path $activeOutputFile)) {
-        $folder = Split-Path -Parent $activeOutputFile
-        Start-Process "explorer.exe" -ArgumentList "/select,`"$activeOutputFile`""
+    if ($script:activeOutputFile -and (Test-Path $script:activeOutputFile)) {
+        Start-Process "explorer.exe" -ArgumentList "/select,`"$($script:activeOutputFile)`""
     }
 })
 
 # Open Project Button
 $btnOpenFile.Add_Click({
-    if ($activeOutputFile -and (Test-Path $activeOutputFile)) {
-        Start-Process $activeOutputFile
+    if ($script:activeOutputFile -and (Test-Path $script:activeOutputFile)) {
+        Start-Process $script:activeOutputFile
     }
 })
 
@@ -1084,6 +1425,9 @@ if ($InputExe) {
 
 # Set Window Icon if available
 $iconPath = Join-Path $ScriptDir "assets\logo\gm8dec.ico"
+if (-not (Test-Path $iconPath)) {
+    $iconPath = Join-Path $ScriptDir "assets\logo\opengmk.ico"
+}
 if (Test-Path $iconPath) {
     try {
         $window.Icon = [System.Windows.Media.Imaging.BitmapFrame]::Create([System.Uri]::new($iconPath))
