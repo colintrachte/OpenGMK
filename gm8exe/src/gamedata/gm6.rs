@@ -29,6 +29,8 @@ pub fn detect(data: &[u8]) -> Option<usize> {
 pub fn parse(data: &[u8], ico_file_raw: Option<Vec<u8>>, strict: bool) -> Result<GameAssets, ReaderError> {
     let offset = detect(data).ok_or(ReaderError::UnknownFormat)?;
     let mut reader = Cursor::new(&data[offset..]);
+    let _magic = reader.read_u32::<LE>()?;
+    let _version = reader.read_u32::<LE>()?;
 
     let included_files = legacy::read_gm600_includes(&mut reader)?;
 

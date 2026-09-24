@@ -40,8 +40,14 @@ pub(crate) fn read_bool(reader: &mut impl Read) -> io::Result<bool> {
     Ok(reader.read_i32::<LE>()? != 0)
 }
 
+const MAX_SAFE_ALLOC_SIZE: usize = 128 * 1024 * 1024; // 128 MB safety ceiling
+const MAX_SAFE_STRING_SIZE: usize = 16 * 1024 * 1024; // 16 MB string ceiling
+
 pub(crate) fn read_pas_string_raw(reader: &mut impl Read) -> io::Result<PascalString> {
     let len = reader.read_u32::<LE>()? as usize;
+    if len > MAX_SAFE_STRING_SIZE {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, format!("String length exceeds safety limit: {} bytes", len)));
+    }
     let mut buf = vec![0u8; len];
     reader.read_exact(&mut buf)?;
     Ok(PascalString(buf.into_boxed_slice()))
@@ -49,6 +55,9 @@ pub(crate) fn read_pas_string_raw(reader: &mut impl Read) -> io::Result<PascalSt
 
 pub(crate) fn read_blob(reader: &mut impl Read) -> io::Result<Vec<u8>> {
     let len = reader.read_u32::<LE>()? as usize;
+    if len > MAX_SAFE_ALLOC_SIZE {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, format!("Blob length exceeds safety limit: {} bytes", len)));
+    }
     let mut buf = vec![0u8; len];
     reader.read_exact(&mut buf)?;
     Ok(buf)
@@ -56,6 +65,9 @@ pub(crate) fn read_blob(reader: &mut impl Read) -> io::Result<Vec<u8>> {
 
 pub(crate) fn skip_blob(reader: &mut impl Read) -> io::Result<()> {
     let len = reader.read_u32::<LE>()? as u64;
+    if len > MAX_SAFE_ALLOC_SIZE as u64 {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, format!("Blob skip length exceeds safety limit: {} bytes", len)));
+    }
     io::copy(&mut reader.take(len), &mut io::sink())?;
     Ok(())
 }
@@ -63,6 +75,9 @@ pub(crate) fn skip_blob(reader: &mut impl Read) -> io::Result<()> {
 /// Reads a u32-prefixed zlib-compressed chunk and inflates it.
 pub(crate) fn read_compressed(reader: &mut impl Read) -> io::Result<Vec<u8>> {
     let len = reader.read_u32::<LE>()? as usize;
+    if len > MAX_SAFE_ALLOC_SIZE {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, format!("Compressed chunk length exceeds safety limit: {} bytes", len)));
+    }
     let mut compressed = vec![0u8; len];
     reader.read_exact(&mut compressed)?;
     let mut decoder = ZlibDecoder::new(compressed.as_slice());
@@ -838,7 +853,6 @@ pub(super) fn read_extensions(reader: &mut impl Read, strict: bool) -> Result<Ve
             let kind = FileKind::from(reader.read_u32::<LE>()?);
             let initializer = read_pas_string_raw(reader)?;
             let finalizer = read_pas_string_raw(reader)?;
-
             let function_count = reader.read_u32::<LE>()?;
             let mut functions = Vec::with_capacity(function_count as usize);
             for _ in 0..function_count {
@@ -868,11 +882,15 @@ pub(super) fn read_extensions(reader: &mut impl Read, strict: bool) -> Result<Ve
             files.push(File { name, kind, initializer, finalizer, functions, consts, contents: Box::new([]) });
         }
 
-        // All of this extension's file contents are bundled into one gmkrypt-ciphered blob.
-        let encrypted = Cursor::new(read_blob(reader)?);
-        let mut decrypted = Cursor::new(gmkrypt_decrypt(encrypted, 0, false, false)?);
-        for file in &mut files {
-            file.contents = read_compressed(&mut decrypted)?.into_boxed_slice();
+        let raw_encrypted = read_blob(reader)?;
+        if !raw_encrypted.is_empty() {
+            let encrypted = Cursor::new(raw_encrypted);
+            let mut decrypted = Cursor::new(gmkrypt_decrypt(encrypted, 0, false, false)?);
+            for file in &mut files {
+                if file.kind != FileKind::ActionLibrary {
+                    file.contents = read_compressed(&mut decrypted)?.into_boxed_slice();
+                }
+            }
         }
 
         extensions.push(Extension { name, folder_name, files });

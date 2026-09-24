@@ -68,10 +68,10 @@ impl Asset for Object {
         // and for easier damage control if this ever becomes a problem.
         // Oh, also, it's 0..=n so the number is actually 11 instead of 12 because there are 12 lists. Yeah.
         let event_list_count = reader.read_u32::<LE>()?;
-        if event_list_count != 11 {
+        if event_list_count != 10 && event_list_count != 11 {
             return Err(Error::MalformedData)
         }
-        let mut events = Vec::with_capacity((event_list_count + 1) as usize);
+        let mut events = Vec::with_capacity(12);
 
         for _ in 0..=event_list_count {
             // Read until we get a negative value in place of the sub_index (indicated here by u32::try_from failing)
@@ -89,6 +89,9 @@ impl Asset for Object {
                 sub_event_list.push((index, actions));
             }
             events.push(sub_event_list);
+        }
+        while events.len() < 12 {
+            events.push(Vec::new());
         }
 
         Ok(Object { name, sprite_index, solid, visible, depth, persistent, parent_index, mask_index, events })
